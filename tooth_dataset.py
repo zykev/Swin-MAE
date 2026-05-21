@@ -26,44 +26,48 @@ class DentalDataset(Dataset):
 
 def get_intraoral_images(data_path):
     """
-    根据特定结构爬取所有图片路径
-    结构: Collector / *_process / {process, sextant, single_tooth} / sample_id / ...
+    根据口腔数据结构爬取所有训练图片路径。
+    支持:
+    1. Collector / *_process / {process, sextant, single_tooth} / sample_id / ...
+    2. split / *_process / {process, sextant, single_tooth} / sample_id / ...
+       例如 .datasets/intraoral/test/s1_process/process/testid1/D.png
     """
-    all_images = []
-    
-    # 1. 遍历收集者文件夹 (e.g., peiliu)
-    for collector in os.listdir(data_path):
-        collector_path = os.path.join(data_path, collector)
-        if not os.path.isdir(collector_path):
-            continue
-            
-        # 2. 遍历以 _process 结尾的日期文件夹
-        for date_folder in os.listdir(collector_path):
-            if not date_folder.endswith('_process'):
-                continue
-            
-            base_folder = os.path.join(collector_path, date_folder)
-            
-            # --- 分支 A: process 文件夹 ---
-            # 路径: .../process/sample_id/{D,F,L,R,U}.png
-            process_root = os.path.join(base_folder, 'process')
-            if os.path.exists(process_root):
-                # 匹配所有 sample_id 下的 png
-                all_images.extend(glob.glob(os.path.join(process_root, "*", "*.png")))
+    if not os.path.isdir(data_path):
+        raise FileNotFoundError(f"data_path does not exist or is not a directory: {data_path}")
 
-            # --- 分支 B: sextant 文件夹 ---
-            # 路径: .../sextant/sample_id/{F,L,R}/*.png
-            sextant_root = os.path.join(base_folder, 'sextant')
-            if os.path.exists(sextant_root):
-                # 匹配 sample_id 下 F, L, R 文件夹内的所有 png
-                all_images.extend(glob.glob(os.path.join(sextant_root, "*", "[FLR]", "*.png")))
+    all_images = set()
+    process_folders = []
 
-            # --- 分支 C: single_tooth 文件夹 ---
-            # 路径: .../single_tooth/sample_id/{D,F,L,R,U}/*.png
-            tooth_root = os.path.join(base_folder, 'single_tooth')
-            if os.path.exists(tooth_root):
-                # 匹配 sample_id 下 D, F, L, R, U 文件夹内的所有 png
-                all_images.extend(glob.glob(os.path.join(tooth_root, "*", "[DFLRU]", "*.png")))
+    for root, dirs, _ in os.walk(data_path):
+        for dirname in dirs:
+            if dirname.endswith('_process'):
+                process_folders.append(os.path.join(root, dirname))
+
+    for base_folder in process_folders:
+        # 路径: .../*_process/process/sample_id/{D,F,L,R,U}.png
+        process_root = os.path.join(base_folder, 'process')
+        if os.path.isdir(process_root):
+            all_images.update(glob.glob(os.path.join(process_root, "*", "*.png")))
+
+        # 路径: .../*_process/sextant/sample_id/{F,L,R}/*.png
+        sextant_root = os.path.join(base_folder, 'sextant')
+        if os.path.isdir(sextant_root):
+            all_images.update(glob.glob(os.path.join(sextant_root, "*", "[FLR]", "*.png")))
+
+        # 路径: .../*_process/single_tooth/sample_id/{D,F,L,R,U}/*.png
+        tooth_root = os.path.join(base_folder, 'single_tooth')
+        if os.path.isdir(tooth_root):
+            all_images.update(glob.glob(os.path.join(tooth_root, "*", "[DFLRU]", "*.png")))
+
+    if not all_images:
+        # 兜底支持普通图片目录，但排除 mask/标注目录，避免把标签图当作 MAE 训练图。
+        patterns = ("*.png", "*.jpg", "*.jpeg", "*.bmp")
+        for pattern in patterns:
+            for path in glob.glob(os.path.join(data_path, "**", pattern), recursive=True):
+                parts = {part.lower() for part in os.path.normpath(path).split(os.sep)}
+                if any("mask" in part for part in parts):
+                    continue
+                all_images.add(path)
 
     return sorted(all_images)
 
@@ -71,7 +75,7 @@ def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
 
     # 获取所有符合结构的图片
-    print(f"正在从 {args.data_path} 检索口腔影像数据...")
+    print(f"Scanning intraoral images from {args.data_path}...")
     all_imgs = get_intraoral_images(args.data_path)
     
     # # 简单的训练/验证集划分 (例如 90% 训练, 10% 验证)
@@ -84,7 +88,8 @@ def build_dataset(is_train, args):
 
     dataset = DentalDataset(all_imgs, transform=transform)
     
-    print(f"{'训练' if is_train else '验证'}集构建完成，包含图片数量: {len(dataset)}")
+    split_name = 'train' if is_train else 'val'
+    print(f"{split_name} dataset built, images: {len(dataset)}")
     return dataset
 
 def build_transform(is_train, args):

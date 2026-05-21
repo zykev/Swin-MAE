@@ -133,7 +133,7 @@ class SwinMAE(nn.Module):
                 index_keep = torch.cat([index_keep, index_keep_part + int(L ** 0.5) * i + j], dim=1)
 
         index_all = np.expand_dims(range(L), axis=0).repeat(B, axis=0) 
-        index_mask = np.zeros([B, int(L - index_keep.shape[-1])], dtype=np.int) 
+        index_mask = np.zeros([B, int(L - index_keep.shape[-1])], dtype=np.int64) 
         for i in range(B):
             index_mask[i] = np.setdiff1d(index_all[i], index_keep.cpu().numpy()[i], assume_unique=True)
         index_mask = torch.tensor(index_mask, device=x.device)
