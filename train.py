@@ -7,13 +7,15 @@ from pathlib import Path
 import torch
 import torch.backends.cudnn as cudnn
 import torch.utils.data
-from torch.utils.tensorboard import SummaryWriter
-import torchvision.transforms as transforms
-import torchvision.datasets as datasets
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ModuleNotFoundError:
+    SummaryWriter = None
 
 import utils.misc as misc
 from utils.misc import NativeScalerWithGradNormCount as NativeScaler
 import swin_mae
+from tooth_dataset import build_dataset
 from utils.engine_pretrain import train_one_epoch
 
 
@@ -78,15 +80,11 @@ def main(args):
     device = torch.device(args.device)
     cudnn.benchmark = True
 
-    # Defining data augmentation
-    transform_train = transforms.Compose([
-        transforms.Resize((args.input_size, args.input_size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor()
-    ])
-
     # Set dataset
-    dataset_train = datasets.ImageFolder(args.data_path, transform=transform_train)
+    dataset_train = build_dataset(is_train=True, args=args)
+    if len(dataset_train) == 0:
+        raise ValueError(f"No training images found under data_path: {args.data_path}")
+
     sampler_train = torch.utils.data.RandomSampler(dataset_train)
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
@@ -99,7 +97,11 @@ def main(args):
     # Log output
     if args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
-        log_writer = SummaryWriter()
+        if SummaryWriter is None:
+            print("TensorBoard is not installed; training will continue without tensorboard logging.")
+            log_writer = None
+        else:
+            log_writer = SummaryWriter(log_dir=args.log_dir)
     else:
         log_writer = None
 
