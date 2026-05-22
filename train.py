@@ -41,7 +41,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
 
     # common parameters
-    parser.add_argument('--config', default='tmp.yaml', type=str,
+    parser.add_argument('--config', default='config.yaml', type=str,
                         help='yaml config path; command line args override yaml values')
     parser.add_argument('--batch_size', default=96, type=int)
     parser.add_argument('--epochs', default=400, type=int)

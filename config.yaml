@@ -19,14 +19,14 @@ MODEL:
   # Use swin_mae if you want to override encoder details in the SWIN section below.
   MODEL: swin_mae_t
   MASK_RATIO: 0.75
-  NORM_PIX_LOSS: false
-  CHECKPOINT_ENCODER: ""
+  NORM_PIX_LOSS: true
+  CHECKPOINT_ENCODER: "tmp\swin_tiny_patch4_window7_224.pth"
   CHECKPOINT_DECODER: ""
 
 OPTIM:
-  LR: 0.001
-  MIN_LR: 0.0
-  WARMUP_EPOCHS: 10
+  LR: 1e-4
+  MIN_LR: 1e-7
+  WARMUP_EPOCHS: 20
   WEIGHT_DECAY: 0.05
 
 LOG:
