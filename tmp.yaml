@@ -1,0 +1,70 @@
+TRAIN:
+  BATCH_SIZE: 96
+  EPOCHS: 400
+  ACCUM_ITER: 1
+  SAVE_FREQ: 400
+  SEED: 0
+  START_EPOCH: 0
+  NUM_WORKERS: 8
+  PIN_MEM: true
+  DEVICE: cuda
+
+DATA:
+  DATA_PATH: .datasets/intraoral
+  VAL_DATA_PATH: ""
+  VAL_RATIO: 0.1
+
+MODEL:
+  # Choose one of: swin_mae_t, swin_mae_s, swin_mae_b.
+  # Use swin_mae if you want to override encoder details in the SWIN section below.
+  MODEL: swin_mae_t
+  MASK_RATIO: 0.75
+  NORM_PIX_LOSS: false
+  CHECKPOINT_ENCODER: ""
+  CHECKPOINT_DECODER: ""
+
+OPTIM:
+  LR: 0.001
+  MIN_LR: 0.0
+  WARMUP_EPOCHS: 10
+  WEIGHT_DECAY: 0.05
+
+LOG:
+  OUTPUT_DIR: output_dir
+  LOG_DIR: output_dir
+  VIS_FREQ: 100
+  VIS_NUM_IMAGES: 8
+
+WANDB:
+  WANDB: false
+  WANDB_PROJECT: swin-mae-pretrain
+  WANDB_ENTITY: intraoral
+  WANDB_RUN_NAME:
+
+DISTRIBUTED:
+  WORLD_SIZE: 1
+  LOCAL_RANK: -1
+  DIST_ON_ITP: false
+  DIST_URL: env://
+  DIST_BACKEND:
+
+SWIN:
+  # The detailed encoder fields below are used only when MODEL.MODEL is swin_mae.
+  # For swin_mae_t/swin_mae_s/swin_mae_b, the encoder presets are defined in swin_mae.py
+  # from swin.txt: tiny/small/base.
+  PRETRAIN_IMG_SIZE: 224
+  PATCH_SIZE: 4
+  IN_CHANS: 3
+  # Leave null to match the decoder input to the selected encoder automatically.
+  DECODER_EMBED_DIM:
+  EMBED_DIM: 96
+  DEPTHS: [2, 2, 6, 2]
+  NUM_HEADS: [3, 6, 12, 24]
+  WINDOW_SIZE: 7
+  QKV_BIAS: true
+  MLP_RATIO: 4.0
+  DROP_PATH_RATE: 0.1
+  DROP_RATE: 0.0
+  ATTN_DROP_RATE: 0.0
+  PATCH_NORM: true
+  APE: false

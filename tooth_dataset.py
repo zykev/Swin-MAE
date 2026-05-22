@@ -75,18 +75,25 @@ def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
 
     # 获取所有符合结构的图片
-    print(f"Scanning intraoral images from {args.data_path}...")
-    all_imgs = get_intraoral_images(args.data_path)
-    
-    # # 简单的训练/验证集划分 (例如 90% 训练, 10% 验证)
-    # # 为了保证实验可重复，这里进行了排序并固定划分
-    # split_idx = int(len(all_imgs) * 0.9)
-    # if is_train:
-    #     img_list = all_imgs[:split_idx]
-    # else:
-    #     img_list = all_imgs[split_idx:]
+    data_path = args.data_path if is_train or not getattr(args, 'val_data_path', '') else args.val_data_path
+    print(f"Scanning intraoral images from {data_path}...")
+    all_imgs = get_intraoral_images(data_path)
 
-    dataset = DentalDataset(all_imgs, transform=transform)
+    if not is_train and getattr(args, 'val_data_path', ''):
+        img_list = all_imgs
+    else:
+        val_ratio = getattr(args, 'val_ratio', 0.0)
+        if val_ratio > 0:
+            split_idx = int(len(all_imgs) * (1.0 - val_ratio))
+            split_idx = min(max(split_idx, 1), len(all_imgs))
+            if is_train:
+                img_list = all_imgs[:split_idx]
+            else:
+                img_list = all_imgs[split_idx:]
+        else:
+            img_list = all_imgs
+
+    dataset = DentalDataset(img_list, transform=transform)
     
     split_name = 'train' if is_train else 'val'
     print(f"{split_name} dataset built, images: {len(dataset)}")

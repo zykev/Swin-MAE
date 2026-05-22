@@ -15,7 +15,7 @@ class SwinMAE(nn.Module):
     """
 
     def __init__(self, img_size: int = 224, patch_size: int = 4, mask_ratio: float = 0.75, in_chans: int = 3,
-                 decoder_embed_dim=512, norm_pix_loss=False,
+                 decoder_embed_dim=None, norm_pix_loss=False,
                  depths: tuple = (2, 2, 6, 2), embed_dim: int = 96, num_heads: tuple = (3, 6, 12, 24),
                  window_size: int = 7, qkv_bias: bool = True, mlp_ratio: float = 4.,
                  drop_path_rate: float = 0.1, drop_rate: float = 0., attn_drop_rate: float = 0.,
@@ -29,6 +29,13 @@ class SwinMAE(nn.Module):
         self.num_layers = len(depths)
         self.depths = depths
         self.embed_dim = embed_dim
+        expected_decoder_embed_dim = embed_dim * 2 ** (self.num_layers - 1)
+        self.decoder_embed_dim = decoder_embed_dim or expected_decoder_embed_dim
+        if self.decoder_embed_dim != expected_decoder_embed_dim:
+            raise ValueError(
+                f"decoder_embed_dim must match the encoder output dim "
+                f"({expected_decoder_embed_dim}) for this decoder, got {self.decoder_embed_dim}."
+            )
         self.num_heads = num_heads
         self.drop_path = drop_path_rate
         self.window_size = window_size
@@ -44,10 +51,10 @@ class SwinMAE(nn.Module):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.layers = self.build_layers()
        
-        self.first_patch_expanding = PatchExpanding(dim=decoder_embed_dim, norm_layer=norm_layer)
+        self.first_patch_expanding = PatchExpanding(dim=self.decoder_embed_dim, norm_layer=norm_layer)
         self.layers_up = self.build_layers_up()
         self.norm_up = norm_layer(embed_dim)
-        self.decoder_pred = nn.Linear(decoder_embed_dim // 8, patch_size ** 2 * in_chans, bias=True)
+        self.decoder_pred = nn.Linear(self.decoder_embed_dim // 8, patch_size ** 2 * in_chans, bias=True)
 
         self.initialize_weights()
 
@@ -249,12 +256,78 @@ class SwinMAE(nn.Module):
         return loss, pred, mask
 
 
-def swin_mae(**kwargs):
-    model = SwinMAE(
-        img_size=224, patch_size=4, in_chans=3,
-        decoder_embed_dim=768,
-        depths=(2, 2, 2, 2), embed_dim=96, num_heads=(3, 6, 12, 24),
-        window_size=7, qkv_bias=True, mlp_ratio=4,
-        drop_path_rate=0.1, drop_rate=0, attn_drop_rate=0,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+SWIN_MAE_VARIANTS = {
+    'tiny': dict(
+        embed_dim=96,
+        depths=(2, 2, 6, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        drop_path_rate=0.2,
+    ),
+    'small': dict(
+        embed_dim=96,
+        depths=(2, 2, 18, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        drop_path_rate=0.3,
+    ),
+    'base': dict(
+        embed_dim=128,
+        depths=(2, 2, 18, 2),
+        num_heads=(4, 8, 16, 32),
+        window_size=7,
+        drop_path_rate=0.5,
+    ),
+}
+
+
+def _build_swin_mae(variant=None, **kwargs):
+    model_args = dict(
+        img_size=224,
+        patch_size=4,
+        in_chans=3,
+        decoder_embed_dim=None,
+        depths=(2, 2, 2, 2),
+        embed_dim=96,
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        qkv_bias=True,
+        mlp_ratio=4,
+        drop_path_rate=0.1,
+        drop_rate=0,
+        attn_drop_rate=0,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),
+    )
+    if variant is not None:
+        model_args.update(SWIN_MAE_VARIANTS[variant])
+    model_args.update(kwargs)
+    model = SwinMAE(**model_args)
     return model
+
+
+def swin_mae(**kwargs):
+    return _build_swin_mae(**kwargs)
+
+
+def swin_mae_t(**kwargs):
+    return _build_swin_mae('tiny', **kwargs)
+
+
+def swin_mae_tiny(**kwargs):
+    return swin_mae_t(**kwargs)
+
+
+def swin_mae_s(**kwargs):
+    return _build_swin_mae('small', **kwargs)
+
+
+def swin_mae_small(**kwargs):
+    return swin_mae_s(**kwargs)
+
+
+def swin_mae_b(**kwargs):
+    return _build_swin_mae('base', **kwargs)
+
+
+def swin_mae_base(**kwargs):
+    return swin_mae_b(**kwargs)

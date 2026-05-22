@@ -1,51 +1,28 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 
-if [[ $# -lt 1 ]]; then
-  echo "Usage: bash scripts/train_swin_mae.sh <gpus> [train.py args...]"
-  echo ""
-  echo "Examples:"
-  echo "  bash scripts/train_swin_mae.sh cuda:1 cuda:2 --batch_size 32 --epochs 400"
-  echo "  bash scripts/train_swin_mae.sh 1,2 --batch_size 32 --data_path .datasets/intraoral"
-  echo "  bash scripts/train_swin_mae.sh 0 --batch_size 16 --epochs 1"
-  exit 1
-fi
+# Set physical GPU ids here. Both "cuda:1 cuda:2" and "1 2" are supported.
+GPUS=${GPUS:-"cuda:1 cuda:2 cuda:3 cuda:4 cuda:5 cuda:6"}
+CONFIG=${CONFIG:-"tmp.yaml"}
 
-gpu_args=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    cuda:*|[0-9]*)
-      gpu_args+=("$1")
-      shift
-      ;;
-    *)
-      break
-      ;;
-  esac
+CUDA_VISIBLE_DEVICES=""
+NUM_GPUS=0
+for GPU in $GPUS; do
+    GPU_ID=${GPU#cuda:}
+    if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+        CUDA_VISIBLE_DEVICES=$GPU_ID
+    else
+        CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES,$GPU_ID
+    fi
+    NUM_GPUS=$((NUM_GPUS + 1))
 done
 
-if [[ ${#gpu_args[@]} -eq 0 ]]; then
-  echo "No GPU id was provided."
-  exit 1
-fi
+export CUDA_VISIBLE_DEVICES
 
-gpu_list="$(
-  IFS=,
-  echo "${gpu_args[*]}"
-)"
-gpu_list="${gpu_list//cuda:/}"
-gpu_list="${gpu_list// /,}"
-gpu_list="${gpu_list//,,/,}"
-gpu_list="${gpu_list#,}"
-gpu_list="${gpu_list%,}"
+echo "Using physical GPUs: $CUDA_VISIBLE_DEVICES"
+echo "Config: $CONFIG"
 
-num_gpus=$(awk -F',' '{print NF}' <<< "${gpu_list}")
-master_port="${MASTER_PORT:-29500}"
-
-echo "Using physical GPUs: ${gpu_list}"
-echo "DDP processes: ${num_gpus}"
-
-CUDA_VISIBLE_DEVICES="${gpu_list}" torchrun \
-  --nproc_per_node="${num_gpus}" \
-  --master_port="${master_port}" \
-  train.py "$@"
+torchrun --nproc_per_node="${NUM_GPUS}" \
+    train.py \
+    --config "${CONFIG}" \
+    "$@"
