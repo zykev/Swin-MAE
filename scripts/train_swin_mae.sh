@@ -2,8 +2,8 @@
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 
 # Set physical GPU ids here. Both "cuda:1 cuda:2" and "1 2" are supported.
-GPUS=${GPUS:-"cuda:1 cuda:2 cuda:3 cuda:4 cuda:5 cuda:6"}
-CONFIG=${CONFIG:-"tmp.yaml"}
+GPUS=${GPUS:-"cuda:3 cuda:4 cuda:5 cuda:6"}
+CONFIG=${CONFIG:-"config.yaml"}
 
 CUDA_VISIBLE_DEVICES=""
 NUM_GPUS=0

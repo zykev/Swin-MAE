@@ -16,7 +16,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint",
-        default="tmp/swin_tiny_patch4_window7_224.pth",
+        default=".checkpoints/intraoral/swin_tiny_patch4_window7_224.pth",
         type=str,
     )
     parser.add_argument(
