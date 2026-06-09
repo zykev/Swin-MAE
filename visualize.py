@@ -1,99 +1,126 @@
-import sys
+import argparse
 import os
-import numpy as np
+from pathlib import Path
 
 import torch
-import matplotlib.pyplot as plt
-from PIL import Image
 
 import swin_mae
-
-sys.path.append('..')
-
-
-# define the utils
-def show_image(image, title=''):
-    # image is [H, W, 3]
-    assert image.shape[2] == 3
-    image = torch.clip(image * 255, 0, 255).int()
-    image = np.asarray(Image.fromarray(np.uint8(image)).resize((224, 448)))
-    plt.imshow(image)
-    plt.title(title, fontsize=16)
-    plt.axis('off')
-    return
+from tooth_dataset import DentalDataset, build_transform, get_intraoral_images
+from train import (
+    apply_config_defaults,
+    get_args_parser as get_train_args_parser,
+    get_model_kwargs,
+    load_config,
+    save_visualization,
+    select_categorized_visualization_paths,
+)
 
 
-def prepare_model(chkpt_dir_, arch='swin_mae'):
-    # build model
-    model = getattr(swin_mae, arch)()
-    # load model
-    checkpoint = torch.load(chkpt_dir_, map_location='cpu')
-    msg = model.load_state_dict(checkpoint['model'], strict=False)
-    print(msg)
-    return model
+def get_args_parser():
+    parser = argparse.ArgumentParser(
+        description='Visualize Swin-MAE reconstructions from a pretraining checkpoint.'
+    )
+    parser.add_argument(
+        '--checkpoint',
+        default='exp/swinmae_v1/checkpoint-400.pth',
+        type=str,
+        help='pretraining checkpoint path',
+    )
+    parser.add_argument(
+        '--config',
+        default='config.yaml',
+        type=str,
+        help='training YAML used to construct the model',
+    )
+    parser.add_argument(
+        '--data_path',
+        default=None,
+        type=str,
+        help='intraoral dataset path; defaults to DATA.DATA_PATH in the YAML',
+    )
+    parser.add_argument(
+        '--num_images',
+        default=None,
+        type=int,
+        help='images sampled per category; defaults to LOG.VIS_NUM_IMAGES in the YAML',
+    )
+    parser.add_argument('--seed', default=42, type=int)
+    parser.add_argument('--device', default='cuda:0', type=str)
+    return parser
 
 
-def run_one_image(x, model):
-    x = torch.tensor(x)
+def load_training_args(config_path):
+    parser = get_train_args_parser()
+    config = load_config(config_path)
+    apply_config_defaults(parser, config)
+    args = parser.parse_args([])
+    args.config = config_path
+    args.config_dict = config
+    return args
 
-    # make it a batch-like
-    x = x.unsqueeze(dim=0)
-    x = torch.einsum('nhwc->nchw', x)
 
-    # run MAE
-    loss, y, mask = model(x.float())
-    y = model.unpatchify(y)
-    y = torch.einsum('nchw->nhwc', y).detach().cpu()
+def load_model(checkpoint_path, train_args, device):
+    model = swin_mae.__dict__[train_args.model](**get_model_kwargs(train_args))
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    state_dict = checkpoint.get('model', checkpoint)
+    result = model.load_state_dict(state_dict, strict=True)
+    print(f'Loaded checkpoint: {checkpoint_path}')
+    print(result)
+    model.to(device)
+    model.eval()
+    return model, int(checkpoint.get('epoch', 0))
 
-    # visualize the mask
-    mask = mask.detach()
-    mask = mask.unsqueeze(-1).repeat(1, 1, model.patch_embed.patch_size ** 2 * 3)  # (N, H*W, p*p*3)
-    mask = model.unpatchify(mask)  # 1 is removing, 0 is keeping
-    mask = torch.einsum('nchw->nhwc', mask).detach().cpu()
 
-    x = torch.einsum('nchw->nhwc', x)
+def main(args):
+    train_args = load_training_args(args.config)
+    train_args.data_path = args.data_path or train_args.data_path
+    train_args.output_dir = os.path.join(os.path.dirname(args.checkpoint), 'inference')
+    train_args.vis_num_images = (
+        args.num_images if args.num_images is not None else train_args.vis_num_images
+    )
+    train_args.seed = args.seed if args.seed is not None else train_args.seed
 
-    # masked image
-    im_masked = x * (1 - mask)
-    y = y * mask
+    if args.device.startswith('cuda') and not torch.cuda.is_available():
+        raise RuntimeError('CUDA was requested but is not available. Use --device cpu if needed.')
+    device = torch.device(args.device)
 
-    # MAE reconstruction pasted with visible patches
-    im_paste = x * (1 - mask) + y * mask
+    image_paths = get_intraoral_images(train_args.data_path)
+    dataset = DentalDataset(image_paths)
+    paths_by_category = select_categorized_visualization_paths(
+        dataset,
+        train_args.vis_num_images,
+        train_args.seed,
+    )
+    if not paths_by_category:
+        raise ValueError(f'No visualization images found under {train_args.data_path}')
 
-    # make the plt figure larger
-    plt.rcParams['figure.figsize'] = [12, 6]
+    print('Visualization samples:')
+    for category in ('process', 'sextant', 'single_tooth'):
+        print(f'  {category}: {len(paths_by_category.get(category, []))} images')
 
-    plt.subplot(1, 4, 1)
-    show_image(x[0], "original")
+    model, checkpoint_epoch = load_model(args.checkpoint, train_args, device)
+    transform = build_transform(is_train=False, args=train_args)
+    Path(train_args.output_dir).mkdir(parents=True, exist_ok=True)
 
-    plt.subplot(1, 4, 2)
-    show_image(im_masked[0], "masked")
+    # save_visualization adds one before formatting the epoch filename.
+    visualization_epoch = max(checkpoint_epoch - 1, 0)
+    torch.manual_seed(train_args.seed)
+    if device.type == 'cuda':
+        torch.cuda.manual_seed_all(train_args.seed)
 
-    plt.subplot(1, 4, 3)
+    for category, category_paths in paths_by_category.items():
+        save_visualization(
+            model=model,
+            image_paths=category_paths,
+            transform=transform,
+            device=device,
+            epoch=visualization_epoch,
+            args=train_args,
+            category=category,
+        )
 
-    show_image(y[0], "reconstruction")
-
-    plt.subplot(1, 4, 4)
-    show_image(im_paste[0], "reconstruction + visible")
-
-    plt.show()
+    print(f'Visualizations saved to: {os.path.abspath(train_args.output_dir)}')
 
 
 if __name__ == '__main__':
-    # 读取图像
-    img_root = r'D:\文件\数据集\腮腺对比学习数据集\三通道合并\concat\临时取出'
-    img_name = r'135_6_l.png'
-    img = Image.open(os.path.join(img_root, img_name))
-    img = img.resize((224, 224))
-    img = np.asarray(img) / 255.
-    assert img.shape == (224, 224, 3)
-
-    # 读取模型
-    chkpt_dir = r'output_dir\checkpoint-400.pth'
-    model_mae = prepare_model(chkpt_dir, 'swin_mae')
-    print('Model loaded.')
-
-    # make random mask reproducible (comment out to make it change)
-    torch.manual_seed(2)
-    print('MAE with pixel reconstruction:')
-    run_one_image(img, model_mae)
+    main(get_args_parser().parse_args())

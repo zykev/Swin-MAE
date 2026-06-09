@@ -180,17 +180,40 @@ def denormalize_batch(imgs):
     return (imgs * std + mean).clamp(0, 1)
 
 
-def select_visualization_paths(dataset, num_images, seed):
-    if num_images <= 0 or not hasattr(dataset, 'image_paths') or len(dataset.image_paths) == 0:
+def select_visualization_paths(image_paths, num_images, seed):
+    if num_images <= 0 or len(image_paths) == 0:
         return []
 
     rng = np.random.default_rng(seed)
     indices = rng.choice(
-        len(dataset.image_paths),
-        size=min(num_images, len(dataset.image_paths)),
+        len(image_paths),
+        size=min(num_images, len(image_paths)),
         replace=False,
     )
-    return [dataset.image_paths[int(i)] for i in indices]
+    return [image_paths[int(i)] for i in indices]
+
+
+def select_categorized_visualization_paths(dataset, num_images, seed):
+    if num_images <= 0 or not hasattr(dataset, 'image_paths'):
+        return {}
+
+    category_paths = {
+        'process': [],
+        'sextant': [],
+        'single_tooth': [],
+    }
+    for image_path in dataset.image_paths:
+        path_parts = {part.lower() for part in Path(image_path).parts}
+        for category in category_paths:
+            if category in path_parts:
+                category_paths[category].append(image_path)
+                break
+
+    return {
+        category: select_visualization_paths(paths, num_images, seed + index)
+        for index, (category, paths) in enumerate(category_paths.items())
+        if paths
+    }
 
 
 def get_model_kwargs(args):
@@ -219,7 +242,9 @@ def get_model_kwargs(args):
 
 
 @torch.no_grad()
-def save_visualization(model, image_paths, transform, device, epoch, args, log_writer=None, wandb_run=None):
+def save_visualization(
+        model, image_paths, transform, device, epoch, args, category,
+        log_writer=None, wandb_run=None):
     if len(image_paths) == 0:
         return
 
@@ -245,7 +270,6 @@ def save_visualization(model, image_paths, transform, device, epoch, args, log_w
     mask = model.unpatchify(mask)
 
     im_masked = imgs * (1 - mask)
-    im_reconstruction = pred * mask
     im_paste = imgs * (1 - mask) + pred * mask
 
     panels = []
@@ -253,27 +277,28 @@ def save_visualization(model, image_paths, transform, device, epoch, args, log_w
         panels.extend([
             denormalize_batch(imgs[i:i + 1]).squeeze(0),
             denormalize_batch(im_masked[i:i + 1]).squeeze(0),
-            denormalize_batch(im_reconstruction[i:i + 1]).squeeze(0),
+            denormalize_batch(pred[i:i + 1]).squeeze(0),
             denormalize_batch(im_paste[i:i + 1]).squeeze(0),
         ])
 
     grid = vutils.make_grid(panels, nrow=4, padding=4)
+    tag = f'reconstruction/{category}'
     save_path = None
     if args.output_dir is not None:
-        vis_dir = os.path.join(args.output_dir, 'visualization')
+        vis_dir = os.path.join(args.output_dir, 'reconstruction', category)
         os.makedirs(vis_dir, exist_ok=True)
         save_path = os.path.join(vis_dir, f'epoch_{epoch + 1:04d}.jpg')
         vutils.save_image(grid, save_path)
 
     if log_writer is not None:
-        log_writer.add_image('reconstruction', grid, epoch + 1)
+        log_writer.add_image(tag, grid, epoch + 1)
     if wandb_run is not None:
         import wandb
         if save_path is not None:
             image = wandb.Image(save_path)
         else:
             image = wandb.Image(grid.detach().cpu().permute(1, 2, 0).numpy())
-        wandb_run.log({'reconstruction': image}, step=epoch + 1)
+        wandb_run.log({tag: image}, step=epoch + 1, commit=False)
 
     if was_training:
         model.train()
@@ -327,10 +352,15 @@ def main(args):
     if len(dataset_train) == 0:
         raise ValueError(f"No training images found under data_path: {args.data_path}")
     dataset_val = build_dataset(is_train=False, args=args)
-    vis_paths = select_visualization_paths(dataset_train, args.vis_num_images, args.seed)
+    vis_paths_by_category = {}
     vis_transform = build_transform(is_train=False, args=args)
-    if misc.is_main_process() and len(vis_paths) > 0:
-        print(f"Visualization samples: {len(vis_paths)} images")
+    if misc.is_main_process() and args.vis_num_images > 0:
+        vis_paths_by_category = select_categorized_visualization_paths(
+            dataset_train, args.vis_num_images, args.seed
+        )
+        print("Visualization samples:")
+        for category in ('process', 'sextant', 'single_tooth'):
+            print(f"  {category}: {len(vis_paths_by_category.get(category, []))} images")
 
     if args.distributed:
         sampler_train = torch.utils.data.DistributedSampler(
@@ -442,10 +472,12 @@ def main(args):
             ((args.vis_freq > 0 and (epoch + 1) % args.vis_freq == 0) or epoch + 1 == args.epochs)
         )
         if visualize_this_epoch:
-            save_visualization(
-                model_without_ddp, vis_paths, vis_transform,
-                device, epoch, args, log_writer=log_writer, wandb_run=wandb_run,
-            )
+            for category, vis_paths in vis_paths_by_category.items():
+                save_visualization(
+                    model_without_ddp, vis_paths, vis_transform,
+                    device, epoch, args, category,
+                    log_writer=log_writer, wandb_run=wandb_run,
+                )
         if args.output_dir and misc.is_main_process() and ((epoch + 1) % args.save_freq == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
