@@ -61,7 +61,7 @@ def load_training_args(config_path):
 
 def load_model(checkpoint_path, train_args, device):
     model = swin_mae.__dict__[train_args.model](**get_model_kwargs(train_args))
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     state_dict = checkpoint.get('model', checkpoint)
     result = model.load_state_dict(state_dict, strict=True)
     print(f'Loaded checkpoint: {checkpoint_path}')
