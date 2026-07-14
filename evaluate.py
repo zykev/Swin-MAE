@@ -63,7 +63,7 @@ def get_args_parser():
     parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--device', default='cuda:0', type=str)
     parser.add_argument('--num_localization_images', default=20, type=int,
-                        help='number of sampled single-tooth localization figures to save; set 0 to disable')
+                        help='sampled localization figures to save per category; set 0 to disable')
     parser.add_argument('--seed', default=42, type=int,
                         help='random seed used when filling visualization samples')
     return parser
@@ -89,13 +89,13 @@ def normalize_fdi(value):
     return str(int(numeric_value)) if numeric_value.is_integer() else text
 
 
-def load_tooth_annotations(processed_root):
-    """Index zeyu tooth_bbox JSON annotations by (case_id, view, fdi)."""
+def load_crop_annotations(processed_root):
+    """Index zeyu tooth and sextant annotations by (case_id, view, crop label)."""
     tooth_bbox_root = processed_root / 'tooth_bbox'
     if not tooth_bbox_root.is_dir():
         raise FileNotFoundError(f'Missing tooth bbox directory: {tooth_bbox_root}')
 
-    annotations = {}
+    annotations = {'single_tooth': {}, 'sextant': {}}
     for annotation_path in sorted(tooth_bbox_root.rglob('*.json')):
         with annotation_path.open('r', encoding='utf-8') as handle:
             annotation = json.load(handle)
@@ -108,18 +108,22 @@ def load_tooth_annotations(processed_root):
         if str(annotation['view']) != view:
             raise ValueError(f"view mismatch in {annotation_path}: {annotation['view']} != {view}")
         image_path = relative_posix_path(annotation['image_path'])
-        for tooth in annotation['teeth']:
-            fdi = normalize_fdi(tooth['fdi'])
-            key = (sample_id, view, fdi)
-            if key in annotations:
-                raise ValueError(f'Duplicate FDI entry in tooth annotations: {key}')
-            annotations[key] = {
-                'annotation_path': annotation_path,
-                'fdi': fdi,
-                # The single-tooth crops are made from this integer, clamped box.
-                'box': tooth['bbox_padded'],
-                'image_path': image_path,
-            }
+        for category, entries, label_key in (
+            ('single_tooth', annotation.get('teeth', []), 'fdi'),
+            ('sextant', annotation.get('sextants', []), 'id'),
+        ):
+            for entry in entries:
+                label = normalize_fdi(entry[label_key]) if category == 'single_tooth' else str(entry[label_key]).strip()
+                key = (sample_id, view, label)
+                if key in annotations[category]:
+                    raise ValueError(f'Duplicate {category} entry in annotations: {key}')
+                annotations[category][key] = {
+                    'annotation_path': annotation_path,
+                    'label': label,
+                    # The stored crops are created from this integer, clamped box.
+                    'box': entry['bbox_padded'],
+                    'image_path': image_path,
+                }
     return annotations
 
 
@@ -142,7 +146,7 @@ def build_pairs(data_path, categories):
                     for full_path in image_files(sample_dir):
                         full_images[relative_posix_path(full_path.relative_to(processed_root))] = full_path
 
-            tooth_annotations = load_tooth_annotations(processed_root) if 'single_tooth' in categories else {}
+            crop_annotations = load_crop_annotations(processed_root) if categories else {}
 
             for category in categories:
                 crop_root = processed_root / category
@@ -156,17 +160,18 @@ def build_pairs(data_path, categories):
                             continue
                         for crop_path in image_files(view_dir):
                             crop_relative_path = relative_posix_path(crop_path.relative_to(processed_root))
-                            tooth_annotation = None
-                            if category == 'single_tooth':
-                                tooth_key = (sample_dir.name, view_dir.name, normalize_fdi(crop_path.stem))
-                                tooth_annotation = tooth_annotations.get(tooth_key)
-                                if tooth_annotation is None:
+                            crop_annotation = None
+                            if category in ('single_tooth', 'sextant'):
+                                label = normalize_fdi(crop_path.stem) if category == 'single_tooth' else crop_path.stem
+                                annotation_key = (sample_dir.name, view_dir.name, label)
+                                crop_annotation = crop_annotations[category].get(annotation_key)
+                                if crop_annotation is None:
                                     annotation_path = (
                                         processed_root / 'tooth_bbox' / sample_dir.name / f'{view_dir.name}.json'
                                     )
-                                    available_fdis = sorted(
-                                        key[2] for key in tooth_annotations
-                                        if key[:2] == tooth_key[:2]
+                                    available_labels = sorted(
+                                        key[2] for key in crop_annotations[category]
+                                        if key[:2] == annotation_key[:2]
                                     )
                                     skipped_records.append({
                                         'category': category,
@@ -175,16 +180,16 @@ def build_pairs(data_path, categories):
                                         'label': crop_path.stem,
                                         'crop_path': str(crop_path),
                                         'annotation_path': str(annotation_path),
-                                        'reason': 'fdi_not_in_tooth_bbox',
-                                        'available_fdis': ','.join(available_fdis),
+                                        'reason': f'{category}_label_not_in_tooth_bbox',
+                                        'available_fdis': ','.join(available_labels),
                                     })
                                     continue
-                                if crop_path.stem != tooth_annotation['fdi']:
+                                if label != crop_annotation['label']:
                                     raise ValueError(
-                                        f'FDI/crop filename mismatch for {crop_relative_path}: '
-                                        f"{tooth_annotation['fdi']} != {crop_path.stem}"
+                                        f'Label/crop filename mismatch for {crop_relative_path}: '
+                                        f"{crop_annotation['label']} != {crop_path.stem}"
                                     )
-                                full_relative_path = tooth_annotation['image_path']
+                                full_relative_path = crop_annotation['image_path']
                             else:
                                 full_relative_path = f'process/{sample_dir.name}/{view_dir.name}.png'
 
@@ -200,7 +205,7 @@ def build_pairs(data_path, categories):
                                 'label': crop_path.stem,
                                 'crop_path': crop_path,
                                 'full_path': full_path,
-                                'tooth_annotation': tooth_annotation,
+                                'crop_annotation': crop_annotation,
                             })
 
     return crop_records, skipped_records
@@ -293,8 +298,8 @@ def predict_box_from_scores(scores, box, grid_height, grid_width, input_size):
     )
 
 
-def load_tooth_box(record, input_size):
-    annotation = record['tooth_annotation']
+def load_target_box(record, input_size):
+    annotation = record['crop_annotation']
     if annotation is None:
         return None
     with PIL.Image.open(record['full_path']) as image:
@@ -354,45 +359,48 @@ def grouped_summary(rows, field):
 
 
 def select_localization_samples(records, budget, seed):
-    """Select low, median, and high localization-IoU examples per intraoral view."""
+    """Select low, median, and high localization-IoU examples per category and view."""
     candidates = [
         record for record in records
-        if record['category'] == 'single_tooth' and record['bbox_in_view']
+        if record['category'] in ('single_tooth', 'sextant') and record['bbox_in_view']
     ]
     if budget <= 0 or not candidates:
         return []
 
-    by_view = defaultdict(list)
+    by_category = defaultdict(list)
     for record in candidates:
-        by_view[record['view']].append(record)
-    views = sorted(by_view)
-    quotas = {view: budget // len(views) for view in views}
-    for view in views[:budget % len(views)]:
-        quotas[view] += 1
-
+        by_category[record['category']].append(record)
     rng = random.Random(seed)
     selected = []
-    for view in views:
-        items = sorted(by_view[view], key=lambda record: (record['oracle_size_iou'], record['crop_path']))
-        chosen = []
-        chosen_paths = set()
-        for index, reason in ((0, 'low_iou'), (len(items) // 2, 'median_iou'), (len(items) - 1, 'high_iou')):
-            if len(chosen) >= quotas[view]:
-                break
-            candidate = items[index]
-            if candidate['crop_path'] not in chosen_paths:
-                candidate = dict(candidate)
-                candidate['selection_reason'] = reason
-                chosen.append(candidate)
-                chosen_paths.add(candidate['crop_path'])
+    for category, category_records in sorted(by_category.items()):
+        by_view = defaultdict(list)
+        for record in category_records:
+            by_view[record['view']].append(record)
+        views = sorted(by_view)
+        quotas = {view: budget // len(views) for view in views}
+        for view in views[:budget % len(views)]:
+            quotas[view] += 1
+        for view in views:
+            items = sorted(by_view[view], key=lambda record: (record['oracle_size_iou'], record['crop_path']))
+            chosen = []
+            chosen_paths = set()
+            for index, reason in ((0, 'low_iou'), (len(items) // 2, 'median_iou'), (len(items) - 1, 'high_iou')):
+                if len(chosen) >= quotas[view]:
+                    break
+                candidate = items[index]
+                if candidate['crop_path'] not in chosen_paths:
+                    candidate = dict(candidate)
+                    candidate['selection_reason'] = reason
+                    chosen.append(candidate)
+                    chosen_paths.add(candidate['crop_path'])
 
-        remaining = [item for item in items if item['crop_path'] not in chosen_paths]
-        rng.shuffle(remaining)
-        for candidate in remaining[:max(0, quotas[view] - len(chosen))]:
-            candidate = dict(candidate)
-            candidate['selection_reason'] = 'seeded_fill'
-            chosen.append(candidate)
-        selected.extend(chosen)
+            remaining = [item for item in items if item['crop_path'] not in chosen_paths]
+            rng.shuffle(remaining)
+            for candidate in remaining[:max(0, quotas[view] - len(chosen))]:
+                candidate = dict(candidate)
+                candidate['selection_reason'] = 'seeded_fill'
+                chosen.append(candidate)
+            selected.extend(chosen)
     return selected
 
 
@@ -430,7 +438,8 @@ def save_localization_figure(record, transform, input_size, output_dir):
 
     figure, axes = plt.subplots(1, 3, figsize=(15, 5))
     axes[0].imshow(crop_rgb)
-    axes[0].set_title(f"Tooth query: {record['label']}")
+    query_name = 'Tooth' if record['category'] == 'single_tooth' else 'Sextant'
+    axes[0].set_title(f'{query_name} query: {record["label"]}')
     for axis, heatmap, title in (
         (axes[1], score_map, 'Cosine similarity'),
         (axes[2], normalized_map, 'Min-max similarity'),
@@ -447,7 +456,7 @@ def save_localization_figure(record, transform, input_size, output_dir):
     for axis in axes:
         axis.set_axis_off()
     figure.suptitle(
-        f"{record['sample_id']} {record['view']} FDI {record['label']} | "
+        f"{record['sample_id']} {record['view']} {query_name} {record['label']} | "
         f"IoU={record['oracle_size_iou']:.3f} | contrast={record['contrast']:.3f} | "
         f"peak hit={record['peak_hit']}",
         fontsize=11,
@@ -457,18 +466,20 @@ def save_localization_figure(record, transform, input_size, output_dir):
         f"{safe_name(record['sample_id'])}_{safe_name(record['view'])}_"
         f"{safe_name(record['label'])}_{safe_name(record['selection_reason'])}.png"
     )
-    figure.savefig(output_dir / filename, dpi=160, bbox_inches='tight')
+    category_dir = output_dir / ('tooth' if record['category'] == 'single_tooth' else 'sextant')
+    category_dir.mkdir(parents=True, exist_ok=True)
+    figure.savefig(category_dir / filename, dpi=160, bbox_inches='tight')
     plt.close(figure)
 
 
 def save_localization_visualizations(records, transform, input_size, output_dir, budget, seed):
     if budget <= 0:
-        return 0, None
+        return {}, None
     output_dir.mkdir(parents=True, exist_ok=True)
     selected = select_localization_samples(records, budget, seed)
     selection_path = output_dir / 'selection.csv'
     fields = [
-        'sample_id', 'view', 'label', 'crop_path', 'selection_reason', 'oracle_size_iou',
+        'category', 'sample_id', 'view', 'label', 'crop_path', 'selection_reason', 'oracle_size_iou',
         'contrast', 'peak_hit', 'top1_recall', 'target_rank_percentile',
     ]
     with selection_path.open('w', newline='', encoding='utf-8') as selection_file:
@@ -477,7 +488,8 @@ def save_localization_visualizations(records, transform, input_size, output_dir,
         for record in selected:
             writer.writerow({field: record[field] for field in fields})
             save_localization_figure(record, transform, input_size, output_dir)
-    return len(selected), selection_path
+    counts = {category: sum(record['category'] == category for record in selected) for category in ('single_tooth', 'sextant')}
+    return {category: count for category, count in counts.items() if count}, selection_path
 
 
 def save_results(records, skipped_records, output_dir, metadata):
@@ -547,8 +559,8 @@ def main(args):
         crop_query = F.normalize(crop_map.mean(dim=(0, 1)), dim=0)
         full_tokens = F.normalize(full_map.reshape(-1, full_map.shape[-1]), dim=1)
         scores = full_tokens @ crop_query
-        target_box = load_tooth_box(record, train_args.input_size)
-        bbox_available = record['tooth_annotation'] is not None
+        target_box = load_target_box(record, train_args.input_size)
+        bbox_available = record['crop_annotation'] is not None
         has_valid_box = (
             target_box is not None and target_box[2] > target_box[0] and target_box[3] > target_box[1]
         )
@@ -569,7 +581,7 @@ def main(args):
             **metrics,
         }
         output_records.append(output_record)
-        if record['category'] == 'single_tooth' and has_valid_box:
+        if record['category'] in ('single_tooth', 'sextant') and has_valid_box:
             visualization_records.append({
                 **output_record,
                 'full_path': str(record['full_path']),
@@ -582,7 +594,7 @@ def main(args):
                 ),
             })
 
-    localization_count, localization_selection_path = save_localization_visualizations(
+    localization_counts, localization_selection_path = save_localization_visualizations(
         visualization_records,
         transform,
         train_args.input_size,
@@ -611,8 +623,9 @@ def main(args):
             'path': str((output_dir / 'skipped_samples.csv').resolve()),
         },
         'localization_visualizations': {
-            'count': localization_count,
-            'directory': str((output_dir / 'localization').resolve()) if localization_count else None,
+            'count': sum(localization_counts.values()),
+            'by_category': localization_counts,
+            'directory': str((output_dir / 'localization').resolve()) if localization_counts else None,
             'selection_csv': str(localization_selection_path.resolve()) if localization_selection_path else None,
         },
         'overall': metric_summary(output_records),
@@ -621,11 +634,14 @@ def main(args):
         'by_tooth_label': grouped_summary(
             [record for record in output_records if record['category'] == 'single_tooth'], 'label'
         ),
+        'by_sextant_label': grouped_summary(
+            [record for record in output_records if record['category'] == 'sextant'], 'label'
+        ),
     }
     csv_path, skipped_path, summary_path = save_results(output_records, skipped_records, output_dir, metadata)
     print(f'Pairs evaluated: {len(output_records)}')
     print(f'Samples skipped for missing tooth bbox: {len(skipped_records)}')
-    print(f'Localization visualizations: {localization_count}')
+    print(f'Localization visualizations: {sum(localization_counts.values())} ({localization_counts})')
     print(f'Similarities: {csv_path}')
     print(f'Skipped samples: {skipped_path}')
     print(f'Summary: {summary_path}')
