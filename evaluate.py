@@ -115,6 +115,7 @@ def load_tooth_annotations(processed_root):
 
 def build_pairs(data_path, categories):
     crop_records = []
+    skipped_records = []
 
     for root, dirnames, _ in os.walk(data_path):
         for dirname in dirnames:
@@ -157,10 +158,17 @@ def build_pairs(data_path, categories):
                                         key[2] for key in tooth_annotations
                                         if key[:2] == tooth_key[:2]
                                     )
-                                    raise KeyError(
-                                        f'No FDI {tooth_key[2]} in {annotation_path}; '
-                                        f'available FDI entries: {available_fdis}'
-                                    )
+                                    skipped_records.append({
+                                        'category': category,
+                                        'sample_id': sample_dir.name,
+                                        'view': view_dir.name,
+                                        'label': crop_path.stem,
+                                        'crop_path': str(crop_path),
+                                        'annotation_path': str(annotation_path),
+                                        'reason': 'fdi_not_in_tooth_bbox',
+                                        'available_fdis': ','.join(available_fdis),
+                                    })
+                                    continue
                                 if crop_path.stem != tooth_annotation['fdi']:
                                     raise ValueError(
                                         f'FDI/crop filename mismatch for {crop_relative_path}: '
@@ -185,7 +193,7 @@ def build_pairs(data_path, categories):
                                 'tooth_annotation': tooth_annotation,
                             })
 
-    return crop_records
+    return crop_records, skipped_records
 
 
 @torch.no_grad()
@@ -335,7 +343,7 @@ def grouped_summary(rows, field):
     return {group: metric_summary(items) for group, items in sorted(groups.items())}
 
 
-def save_results(records, output_dir, metadata):
+def save_results(records, skipped_records, output_dir, metadata):
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / 'per_crop_similarity.csv'
     fields = [
@@ -347,10 +355,19 @@ def save_results(records, output_dir, metadata):
         writer.writeheader()
         writer.writerows(records)
 
+    skipped_path = output_dir / 'skipped_samples.csv'
+    skipped_fields = [
+        'category', 'sample_id', 'view', 'label', 'crop_path', 'annotation_path', 'reason', 'available_fdis',
+    ]
+    with skipped_path.open('w', newline='', encoding='utf-8') as skipped_file:
+        writer = csv.DictWriter(skipped_file, fieldnames=skipped_fields)
+        writer.writeheader()
+        writer.writerows(skipped_records)
+
     summary_path = output_dir / 'summary.json'
     with summary_path.open('w', encoding='utf-8') as summary_file:
         json.dump(metadata, summary_file, ensure_ascii=False, indent=2)
-    return csv_path, summary_path
+    return csv_path, skipped_path, summary_path
 
 
 def main(args):
@@ -366,7 +383,7 @@ def main(args):
         raise FileNotFoundError(f'Evaluation data directory not found: {data_path}')
     output_dir = Path(args.output_dir or Path(args.checkpoint).parent / 'eval')
     device = torch.device(args.device)
-    pairs = build_pairs(data_path, args.categories)
+    pairs, skipped_records = build_pairs(data_path, args.categories)
     if not pairs:
         raise ValueError(f'No crop/full-mouth pairs found under {data_path}')
 
@@ -429,6 +446,10 @@ def main(args):
                 record['bbox_available'] and not record['bbox_in_view'] for record in output_records
             ),
         },
+        'skipped_samples': {
+            'count': len(skipped_records),
+            'path': str((output_dir / 'skipped_samples.csv').resolve()),
+        },
         'overall': metric_summary(output_records),
         'by_category': grouped_summary(output_records, 'category'),
         'by_view': grouped_summary(output_records, 'view'),
@@ -436,9 +457,11 @@ def main(args):
             [record for record in output_records if record['category'] == 'single_tooth'], 'label'
         ),
     }
-    csv_path, summary_path = save_results(output_records, output_dir, metadata)
+    csv_path, skipped_path, summary_path = save_results(output_records, skipped_records, output_dir, metadata)
     print(f'Pairs evaluated: {len(output_records)}')
+    print(f'Samples skipped for missing tooth bbox: {len(skipped_records)}')
     print(f'Similarities: {csv_path}')
+    print(f'Skipped samples: {skipped_path}')
     print(f'Summary: {summary_path}')
 
 
