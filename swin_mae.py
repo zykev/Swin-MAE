@@ -216,6 +216,13 @@ class SwinMAE(nn.Module):
 
         return x, mask
 
+    def forward_encoder_features(self, x):
+        """Return final encoder features without MAE masking for downstream evaluation."""
+        x = self.patch_embed(x)
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
     def forward_decoder(self, x):
        
         x = self.first_patch_expanding(x)
