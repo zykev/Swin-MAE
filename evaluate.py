@@ -17,7 +17,7 @@ from visualize import load_model, load_training_args
 
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.bmp'}
 METRIC_KEYS = (
-    'mean_similarity', 'max_similarity', 'inside_similarity', 'outside_similarity', 'contrast',
+    'global_similarity', 'mean_similarity', 'max_similarity', 'inside_similarity', 'outside_similarity', 'contrast',
     'peak_hit', 'top1_recall', 'top5_recall', 'top10_recall', 'oracle_size_iou',
     'center_error_norm', 'target_rank_percentile',
 )
@@ -65,8 +65,36 @@ def image_files(directory):
     return sorted(path for path in directory.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES)
 
 
+def relative_posix_path(path):
+    return Path(str(path).replace('\\', '/')).as_posix()
+
+
+def load_tooth_annotations(processed_root):
+    """Index zeyu tooth_bbox JSON annotations by their declared crop_path."""
+    tooth_bbox_root = processed_root / 'tooth_bbox'
+    if not tooth_bbox_root.is_dir():
+        raise FileNotFoundError(f'Missing tooth bbox directory: {tooth_bbox_root}')
+
+    annotations = {}
+    for annotation_path in sorted(tooth_bbox_root.rglob('*.json')):
+        with annotation_path.open('r', encoding='utf-8') as handle:
+            annotation = json.load(handle)
+        image_path = relative_posix_path(annotation['image_path'])
+        for tooth in annotation['teeth']:
+            crop_path = relative_posix_path(tooth['crop_path'])
+            if crop_path in annotations:
+                raise ValueError(f'Duplicate crop_path in tooth annotations: {crop_path}')
+            annotations[crop_path] = {
+                'annotation_path': annotation_path,
+                'fdi': str(tooth['fdi']),
+                # The single-tooth crops are made from this integer, clamped box.
+                'box': tooth['bbox_padded'],
+                'image_path': image_path,
+            }
+    return annotations
+
+
 def build_pairs(data_path, categories):
-    full_images = {}
     crop_records = []
 
     for root, dirnames, _ in os.walk(data_path):
@@ -75,14 +103,16 @@ def build_pairs(data_path, categories):
                 continue
 
             processed_root = Path(root) / dirname
+            full_images = {}
             process_root = processed_root / 'process'
             if process_root.is_dir():
                 for sample_dir in process_root.iterdir():
                     if not sample_dir.is_dir():
                         continue
                     for full_path in image_files(sample_dir):
-                        key = (str(processed_root.resolve()), sample_dir.name, full_path.stem)
-                        full_images[key] = full_path
+                        full_images[relative_posix_path(full_path.relative_to(processed_root))] = full_path
+
+            tooth_annotations = load_tooth_annotations(processed_root) if 'single_tooth' in categories else {}
 
             for category in categories:
                 crop_root = processed_root / category
@@ -94,12 +124,29 @@ def build_pairs(data_path, categories):
                     for view_dir in sample_dir.iterdir():
                         if not view_dir.is_dir():
                             continue
-                        full_key = (str(processed_root.resolve()), sample_dir.name, view_dir.name)
-                        full_path = full_images.get(full_key)
-                        if full_path is None:
-                            continue
-                        bbox_path = processed_root / 'tooth_bbox' / sample_dir.name / f'{view_dir.name}.json'
                         for crop_path in image_files(view_dir):
+                            crop_relative_path = relative_posix_path(crop_path.relative_to(processed_root))
+                            tooth_annotation = None
+                            if category == 'single_tooth':
+                                tooth_annotation = tooth_annotations.get(crop_relative_path)
+                                if tooth_annotation is None:
+                                    raise KeyError(
+                                        f'No tooth_bbox entry for single-tooth crop: {crop_relative_path}'
+                                    )
+                                if crop_path.stem != tooth_annotation['fdi']:
+                                    raise ValueError(
+                                        f'FDI/crop filename mismatch for {crop_relative_path}: '
+                                        f"{tooth_annotation['fdi']} != {crop_path.stem}"
+                                    )
+                                full_relative_path = tooth_annotation['image_path']
+                            else:
+                                full_relative_path = f'process/{sample_dir.name}/{view_dir.name}.png'
+
+                            full_path = full_images.get(full_relative_path)
+                            if full_path is None:
+                                raise FileNotFoundError(
+                                    f'Full-mouth image for {crop_relative_path} is absent: {full_relative_path}'
+                                )
                             crop_records.append({
                                 'category': category,
                                 'sample_id': sample_dir.name,
@@ -107,7 +154,7 @@ def build_pairs(data_path, categories):
                                 'label': crop_path.stem,
                                 'crop_path': crop_path,
                                 'full_path': full_path,
-                                'bbox_path': bbox_path if category == 'single_tooth' and bbox_path.is_file() else None,
+                                'tooth_annotation': tooth_annotation,
                             })
 
     return crop_records
@@ -134,17 +181,24 @@ def extract_encoder_maps(model, image_paths, transform, device, batch_size, num_
 
 def transform_box_for_eval(box, original_size, input_size):
     width, height = original_size
-    resize_scale = input_size / min(width, height)
-    resized_width = round(width * resize_scale)
-    resized_height = round(height * resize_scale)
-    crop_left = max((resized_width - input_size) // 2, 0)
-    crop_top = max((resized_height - input_size) // 2, 0)
+    crop_pct = 224 / 256 if input_size <= 224 else 1.0
+    resize_size = int(input_size / crop_pct)
+    if width < height:
+        resized_width = resize_size
+        resized_height = int(resize_size * height / width)
+    else:
+        resized_width = int(resize_size * width / height)
+        resized_height = resize_size
+    scale_x = resized_width / width
+    scale_y = resized_height / height
+    crop_left = max(int(round((resized_width - input_size) / 2.0)), 0)
+    crop_top = max(int(round((resized_height - input_size) / 2.0)), 0)
     x1, y1, x2, y2 = (float(value) for value in box)
     transformed = (
-        x1 * resize_scale - crop_left,
-        y1 * resize_scale - crop_top,
-        x2 * resize_scale - crop_left,
-        y2 * resize_scale - crop_top,
+        x1 * scale_x - crop_left,
+        y1 * scale_y - crop_top,
+        x2 * scale_x - crop_left,
+        y2 * scale_y - crop_top,
     )
     return tuple(max(0.0, min(float(input_size), value)) for value in transformed)
 
@@ -194,19 +248,17 @@ def predict_box_from_scores(scores, box, grid_height, grid_width, input_size):
 
 
 def load_tooth_box(record, input_size):
-    if record['bbox_path'] is None:
-        return None
-    with record['bbox_path'].open('r', encoding='utf-8') as handle:
-        annotation = json.load(handle)
-    entries = annotation.get(record['label'])
-    if not entries:
+    annotation = record['tooth_annotation']
+    if annotation is None:
         return None
     with PIL.Image.open(record['full_path']) as image:
-        return transform_box_for_eval(entries[0]['box'], image.size, input_size)
+        transformed = transform_box_for_eval(annotation['box'], image.size, input_size)
+    return transformed
 
 
-def similarity_metrics(scores, target_box, grid_height, grid_width, input_size):
+def similarity_metrics(scores, global_similarity, target_box, grid_height, grid_width, input_size):
     metrics = {
+        'global_similarity': float(global_similarity.item()),
         'mean_similarity': float(scores.mean().item()),
         'max_similarity': float(scores.max().item()),
     }
@@ -258,7 +310,10 @@ def grouped_summary(rows, field):
 def save_results(records, output_dir, metadata):
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / 'per_crop_similarity.csv'
-    fields = ['category', 'sample_id', 'view', 'label', 'crop_path', 'full_mouth_path', *METRIC_KEYS]
+    fields = [
+        'category', 'sample_id', 'view', 'label', 'crop_path', 'full_mouth_path',
+        'bbox_available', 'bbox_in_view', *METRIC_KEYS,
+    ]
     with csv_path.open('w', newline='', encoding='utf-8') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fields)
         writer.writeheader()
@@ -310,7 +365,15 @@ def main(args):
         full_tokens = F.normalize(full_map.reshape(-1, full_map.shape[-1]), dim=1)
         scores = full_tokens @ crop_query
         target_box = load_tooth_box(record, train_args.input_size)
-        metrics = similarity_metrics(scores, target_box, grid_height, grid_width, train_args.input_size)
+        bbox_available = record['tooth_annotation'] is not None
+        has_valid_box = (
+            target_box is not None and target_box[2] > target_box[0] and target_box[3] > target_box[1]
+        )
+        full_global = F.normalize(full_map.mean(dim=(0, 1)), dim=0)
+        global_similarity = torch.dot(crop_query, full_global)
+        metrics = similarity_metrics(
+            scores, global_similarity, target_box, grid_height, grid_width, train_args.input_size
+        )
         output_records.append({
             'category': record['category'],
             'sample_id': record['sample_id'],
@@ -318,6 +381,8 @@ def main(args):
             'label': record['label'],
             'crop_path': str(record['crop_path']),
             'full_mouth_path': str(record['full_path']),
+            'bbox_available': bbox_available,
+            'bbox_in_view': has_valid_box,
             **metrics,
         })
 
@@ -328,6 +393,14 @@ def main(args):
         'data_path': str(data_path.resolve()),
         'collector': args.collector or None,
         'feature': 'crop_global_average_pooling_vs_full_encoder_patch_tokens_cosine_similarity',
+        'bbox_coverage': {
+            'annotation_available': sum(record['bbox_available'] for record in output_records),
+            'annotation_missing': sum(not record['bbox_available'] for record in output_records),
+            'in_model_input': sum(record['bbox_in_view'] for record in output_records),
+            'outside_model_input': sum(
+                record['bbox_available'] and not record['bbox_in_view'] for record in output_records
+            ),
+        },
         'overall': metric_summary(output_records),
         'by_category': grouped_summary(output_records, 'category'),
         'by_view': grouped_summary(output_records, 'view'),
