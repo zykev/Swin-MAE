@@ -114,13 +114,18 @@ def build_pairs(data_path, categories):
 
 
 @torch.no_grad()
-def extract_encoder_maps(model, image_paths, transform, device, batch_size, num_workers):
+def extract_encoder_maps(model, image_paths, transform, device, batch_size, num_workers, input_size):
     dataset = ImagePathDataset(image_paths, transform)
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers,
                         pin_memory=device.type == 'cuda', shuffle=False)
     features = [None] * len(dataset)
     model.eval()
     for images, indices in loader:
+        if tuple(images.shape[-2:]) != (input_size, input_size):
+            raise RuntimeError(
+                f'Evaluation transform produced {tuple(images.shape[-2:])}, '
+                f'but the model expects {(input_size, input_size)}.'
+            )
         encoded = model.forward_encoder_features(images.to(device, non_blocking=True)).cpu()
         for index, feature in zip(indices.tolist(), encoded):
             features[index] = feature
@@ -293,6 +298,7 @@ def main(args):
         device,
         args.batch_size,
         args.num_workers,
+        train_args.input_size,
     )
 
     output_records = []
