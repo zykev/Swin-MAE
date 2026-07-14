@@ -3,12 +3,18 @@ import csv
 import json
 import math
 import os
+import random
 from collections import defaultdict
 from pathlib import Path
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
 import PIL.Image
 import torch
 import torch.nn.functional as F
+from matplotlib.patches import Rectangle
 from torch.utils.data import DataLoader, Dataset
 
 from tooth_dataset import build_transform
@@ -56,6 +62,10 @@ def get_args_parser():
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--device', default='cuda:0', type=str)
+    parser.add_argument('--num_localization_images', default=20, type=int,
+                        help='number of sampled single-tooth localization figures to save; set 0 to disable')
+    parser.add_argument('--seed', default=42, type=int,
+                        help='random seed used when filling visualization samples')
     return parser
 
 
@@ -343,6 +353,133 @@ def grouped_summary(rows, field):
     return {group: metric_summary(items) for group, items in sorted(groups.items())}
 
 
+def select_localization_samples(records, budget, seed):
+    """Select low, median, and high localization-IoU examples per intraoral view."""
+    candidates = [
+        record for record in records
+        if record['category'] == 'single_tooth' and record['bbox_in_view']
+    ]
+    if budget <= 0 or not candidates:
+        return []
+
+    by_view = defaultdict(list)
+    for record in candidates:
+        by_view[record['view']].append(record)
+    views = sorted(by_view)
+    quotas = {view: budget // len(views) for view in views}
+    for view in views[:budget % len(views)]:
+        quotas[view] += 1
+
+    rng = random.Random(seed)
+    selected = []
+    for view in views:
+        items = sorted(by_view[view], key=lambda record: (record['oracle_size_iou'], record['crop_path']))
+        chosen = []
+        chosen_paths = set()
+        for index, reason in ((0, 'low_iou'), (len(items) // 2, 'median_iou'), (len(items) - 1, 'high_iou')):
+            if len(chosen) >= quotas[view]:
+                break
+            candidate = items[index]
+            if candidate['crop_path'] not in chosen_paths:
+                candidate = dict(candidate)
+                candidate['selection_reason'] = reason
+                chosen.append(candidate)
+                chosen_paths.add(candidate['crop_path'])
+
+        remaining = [item for item in items if item['crop_path'] not in chosen_paths]
+        rng.shuffle(remaining)
+        for candidate in remaining[:max(0, quotas[view] - len(chosen))]:
+            candidate = dict(candidate)
+            candidate['selection_reason'] = 'seeded_fill'
+            chosen.append(candidate)
+        selected.extend(chosen)
+    return selected
+
+
+def tensor_to_rgb(tensor):
+    mean = torch.tensor((0.485, 0.456, 0.406), dtype=tensor.dtype).view(3, 1, 1)
+    std = torch.tensor((0.229, 0.224, 0.225), dtype=tensor.dtype).view(3, 1, 1)
+    return (tensor.detach().cpu() * std + mean).clamp(0, 1).permute(1, 2, 0).numpy()
+
+
+def transformed_rgb(image_path, transform):
+    with PIL.Image.open(image_path) as image:
+        return tensor_to_rgb(transform(image.convert('RGB')))
+
+
+def draw_box(axis, box, color, label):
+    axis.add_patch(Rectangle(
+        (box[0], box[1]), box[2] - box[0], box[3] - box[1],
+        fill=False, edgecolor=color, linewidth=2,
+    ))
+    axis.text(
+        box[0], max(box[1] - 4, 8), label, color=color, fontsize=8,
+        bbox={'facecolor': 'black', 'alpha': 0.55, 'pad': 1, 'edgecolor': 'none'},
+    )
+
+
+def safe_name(value):
+    return ''.join(character if character.isalnum() or character in '-_.' else '_' for character in str(value))
+
+
+def save_localization_figure(record, transform, input_size, output_dir):
+    full_rgb = transformed_rgb(record['full_path'], transform)
+    crop_rgb = transformed_rgb(record['crop_path'], transform)
+    score_map = record['scores'].reshape(record['grid_height'], record['grid_width']).numpy()
+    normalized_map = (score_map - score_map.min()) / max(float(score_map.max() - score_map.min()), 1e-8)
+
+    figure, axes = plt.subplots(1, 3, figsize=(15, 5))
+    axes[0].imshow(crop_rgb)
+    axes[0].set_title(f"Tooth query: {record['label']}")
+    for axis, heatmap, title in (
+        (axes[1], score_map, 'Cosine similarity'),
+        (axes[2], normalized_map, 'Min-max similarity'),
+    ):
+        axis.imshow(full_rgb)
+        rendered = axis.imshow(
+            heatmap, cmap='magma', alpha=0.55,
+            extent=(0, input_size, input_size, 0), aspect='auto',
+        )
+        draw_box(axis, record['target_box'], 'lime', 'GT')
+        draw_box(axis, record['predicted_box'], 'red', 'Prediction')
+        axis.set_title(title)
+        figure.colorbar(rendered, ax=axis, fraction=0.046, pad=0.04)
+    for axis in axes:
+        axis.set_axis_off()
+    figure.suptitle(
+        f"{record['sample_id']} {record['view']} FDI {record['label']} | "
+        f"IoU={record['oracle_size_iou']:.3f} | contrast={record['contrast']:.3f} | "
+        f"peak hit={record['peak_hit']}",
+        fontsize=11,
+    )
+    figure.tight_layout()
+    filename = (
+        f"{safe_name(record['sample_id'])}_{safe_name(record['view'])}_"
+        f"{safe_name(record['label'])}_{safe_name(record['selection_reason'])}.png"
+    )
+    figure.savefig(output_dir / filename, dpi=160, bbox_inches='tight')
+    plt.close(figure)
+
+
+def save_localization_visualizations(records, transform, input_size, output_dir, budget, seed):
+    if budget <= 0:
+        return 0, None
+    output_dir.mkdir(parents=True, exist_ok=True)
+    selected = select_localization_samples(records, budget, seed)
+    selection_path = output_dir / 'selection.csv'
+    fields = [
+        'sample_id', 'view', 'label', 'crop_path', 'selection_reason', 'oracle_size_iou',
+        'contrast', 'peak_hit', 'top1_recall', 'target_rank_percentile',
+    ]
+    with selection_path.open('w', newline='', encoding='utf-8') as selection_file:
+        writer = csv.DictWriter(selection_file, fieldnames=fields)
+        writer.writeheader()
+        for record in selected:
+            writer.writerow({field: record[field] for field in fields})
+            save_localization_figure(record, transform, input_size, output_dir)
+    return len(selected), selection_path
+
+
 def save_results(records, skipped_records, output_dir, metadata):
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / 'per_crop_similarity.csv'
@@ -402,6 +539,7 @@ def main(args):
     )
 
     output_records = []
+    visualization_records = []
     for record in pairs:
         full_map = feature_maps[str(record['full_path'])]
         crop_map = feature_maps[str(record['crop_path'])]
@@ -419,7 +557,7 @@ def main(args):
         metrics = similarity_metrics(
             scores, global_similarity, target_box, grid_height, grid_width, train_args.input_size
         )
-        output_records.append({
+        output_record = {
             'category': record['category'],
             'sample_id': record['sample_id'],
             'view': record['view'],
@@ -429,7 +567,29 @@ def main(args):
             'bbox_available': bbox_available,
             'bbox_in_view': has_valid_box,
             **metrics,
-        })
+        }
+        output_records.append(output_record)
+        if record['category'] == 'single_tooth' and has_valid_box:
+            visualization_records.append({
+                **output_record,
+                'full_path': str(record['full_path']),
+                'scores': scores.detach().cpu(),
+                'grid_height': grid_height,
+                'grid_width': grid_width,
+                'target_box': target_box,
+                'predicted_box': predict_box_from_scores(
+                    scores, target_box, grid_height, grid_width, train_args.input_size
+                ),
+            })
+
+    localization_count, localization_selection_path = save_localization_visualizations(
+        visualization_records,
+        transform,
+        train_args.input_size,
+        output_dir / 'localization',
+        args.num_localization_images,
+        args.seed,
+    )
 
     metadata = {
         'checkpoint': os.path.abspath(args.checkpoint),
@@ -450,6 +610,11 @@ def main(args):
             'count': len(skipped_records),
             'path': str((output_dir / 'skipped_samples.csv').resolve()),
         },
+        'localization_visualizations': {
+            'count': localization_count,
+            'directory': str((output_dir / 'localization').resolve()) if localization_count else None,
+            'selection_csv': str(localization_selection_path.resolve()) if localization_selection_path else None,
+        },
         'overall': metric_summary(output_records),
         'by_category': grouped_summary(output_records, 'category'),
         'by_view': grouped_summary(output_records, 'view'),
@@ -460,6 +625,7 @@ def main(args):
     csv_path, skipped_path, summary_path = save_results(output_records, skipped_records, output_dir, metadata)
     print(f'Pairs evaluated: {len(output_records)}')
     print(f'Samples skipped for missing tooth bbox: {len(skipped_records)}')
+    print(f'Localization visualizations: {localization_count}')
     print(f'Similarities: {csv_path}')
     print(f'Skipped samples: {skipped_path}')
     print(f'Summary: {summary_path}')
