@@ -70,7 +70,7 @@ def relative_posix_path(path):
 
 
 def load_tooth_annotations(processed_root):
-    """Index zeyu tooth_bbox JSON annotations by their declared crop_path."""
+    """Index zeyu tooth_bbox JSON annotations by (case_id, view, fdi)."""
     tooth_bbox_root = processed_root / 'tooth_bbox'
     if not tooth_bbox_root.is_dir():
         raise FileNotFoundError(f'Missing tooth bbox directory: {tooth_bbox_root}')
@@ -79,12 +79,20 @@ def load_tooth_annotations(processed_root):
     for annotation_path in sorted(tooth_bbox_root.rglob('*.json')):
         with annotation_path.open('r', encoding='utf-8') as handle:
             annotation = json.load(handle)
+        sample_id = annotation_path.parent.name
+        view = annotation_path.stem
+        if str(annotation['case_id']) != sample_id:
+            raise ValueError(
+                f"case_id mismatch in {annotation_path}: {annotation['case_id']} != {sample_id}"
+            )
+        if str(annotation['view']) != view:
+            raise ValueError(f"view mismatch in {annotation_path}: {annotation['view']} != {view}")
         image_path = relative_posix_path(annotation['image_path'])
         for tooth in annotation['teeth']:
-            crop_path = relative_posix_path(tooth['crop_path'])
-            if crop_path in annotations:
-                raise ValueError(f'Duplicate crop_path in tooth annotations: {crop_path}')
-            annotations[crop_path] = {
+            key = (sample_id, view, str(tooth['fdi']))
+            if key in annotations:
+                raise ValueError(f'Duplicate FDI entry in tooth annotations: {key}')
+            annotations[key] = {
                 'annotation_path': annotation_path,
                 'fdi': str(tooth['fdi']),
                 # The single-tooth crops are made from this integer, clamped box.
@@ -128,10 +136,11 @@ def build_pairs(data_path, categories):
                             crop_relative_path = relative_posix_path(crop_path.relative_to(processed_root))
                             tooth_annotation = None
                             if category == 'single_tooth':
-                                tooth_annotation = tooth_annotations.get(crop_relative_path)
+                                tooth_key = (sample_dir.name, view_dir.name, crop_path.stem)
+                                tooth_annotation = tooth_annotations.get(tooth_key)
                                 if tooth_annotation is None:
                                     raise KeyError(
-                                        f'No tooth_bbox entry for single-tooth crop: {crop_relative_path}'
+                                        f'No tooth_bbox entry for single-tooth crop: {tooth_key}'
                                     )
                                 if crop_path.stem != tooth_annotation['fdi']:
                                     raise ValueError(
