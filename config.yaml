@@ -13,6 +13,13 @@ DATA:
   DATA_PATH: .datasets/intraoral
   VAL_DATA_PATH: ""
   VAL_RATIO: 0.1
+  # 病例级 train/test 划分（datasets/split.py::create_or_load_split）。
+  # 设置 SPLIT_JSON 后，--val_data_path / --val_ratio 的路径序划分不再生效。
+  SPLIT_JSON: ".datasets/intraoral/train_test_seed0_test0p2.json"
+  SPLIT: train
+  CATEGORIES: "full,tooth,sextant,group"
+  # 每类下采样比例（可选）："full:1.0,tooth:0.5,sextant:0.5,group:0.5"
+  CATEGORY_SAMPLING: null
 
 MODEL:
   # Choose one of: swin_mae_t, swin_mae_s, swin_mae_b.

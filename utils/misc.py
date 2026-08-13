@@ -294,7 +294,7 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
     return total_norm
 
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler):
+def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, split_metadata=None):
     output_dir = Path(args.output_dir)
     epoch_name = str(epoch)
     if loss_scaler is not None:
@@ -307,6 +307,9 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler):
                 'scaler': loss_scaler.state_dict(),
                 'args': args,
             }
+            # 病例级 split / manifest 审计侧车（compare/ 用其做泄漏检查与覆盖统计）
+            if split_metadata is not None:
+                to_save['split_metadata'] = split_metadata
 
             save_on_master(to_save, checkpoint_path)
     else:
@@ -315,11 +318,13 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler):
 
 
 def load_model(args, model_without_ddp):
+    """Load initialization weights from --checkpoint_encoder / --checkpoint_decoder."""
     model_dict = model_without_ddp.state_dict()
     if args.checkpoint_encoder:
         print(f'Use encoder weights: {args.checkpoint_encoder}')
         # 读入编码器权重
-        checkpoint_encoder = torch.load(args.checkpoint_encoder, map_location='cpu')['model']
+        checkpoint_encoder = torch.load(args.checkpoint_encoder, map_location='cpu')
+        checkpoint_encoder = _unwrap_state_dict(checkpoint_encoder)
         # 去除model中不存在的权重
         for key in list(checkpoint_encoder.keys()):
             if key not in model_dict:
@@ -330,7 +335,8 @@ def load_model(args, model_without_ddp):
     if args.checkpoint_decoder:
         print(f'Use decoder weights: {args.checkpoint_decoder}')
         # 读入解码器权重
-        checkpoint_decoder = torch.load(args.checkpoint_decoder, map_location='cpu')['model']
+        checkpoint_decoder = torch.load(args.checkpoint_decoder, map_location='cpu')
+        checkpoint_decoder = _unwrap_state_dict(checkpoint_decoder)
         # 只留下解码器权重
         for key in list(checkpoint_decoder.keys()):
             if (not key.startswith('decoder')) or (key not in model_dict):
@@ -355,6 +361,28 @@ def load_model(args, model_without_ddp):
         # strict=False允许dict不必包含所有model中的参数
         result = model_without_ddp.load_state_dict(checkpoint, strict=False)
         print(result)
+
+
+def _unwrap_state_dict(checkpoint):
+    """Accept both plain state_dicts and checkpoints wrapped in 'model'/'state_dict'."""
+    if isinstance(checkpoint, dict):
+        for key in ("model", "state_dict", "module", "net"):
+            if key in checkpoint and isinstance(checkpoint[key], dict):
+                return checkpoint[key]
+    return checkpoint
+
+
+def load_resume(args, model_without_ddp, optimizer, loss_scaler):
+    """Full recovery from --resume: model + optimizer + scaler + epoch."""
+    checkpoint = torch.load(args.resume, map_location='cpu')
+    model_without_ddp.load_state_dict(checkpoint['model'])
+    print("Resume checkpoint %s" % args.resume)
+    if 'optimizer' in checkpoint and 'epoch' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        args.start_epoch = checkpoint['epoch']
+        if 'scaler' in checkpoint and loss_scaler is not None:
+            loss_scaler.load_state_dict(checkpoint['scaler'])
+        print("With optim & sched!")
 
 
 def all_reduce_mean(x):

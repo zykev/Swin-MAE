@@ -23,8 +23,30 @@ except ModuleNotFoundError:
 import utils.misc as misc
 from utils.misc import NativeScalerWithGradNormCount as NativeScaler
 import swin_mae
-from tooth_dataset import build_dataset, build_transform
+from tooth_dataset import build_dataset, build_transform, DentalRecordDataset
 from utils.engine_pretrain import train_one_epoch
+
+
+def _with_exposures(split_metadata, dataset_train):
+    """Attach per-category exposure totals (train-only fetches) to split_metadata,
+    so each checkpoint records how many times each record was seen."""
+    if split_metadata is None:
+        return None
+    exposures = getattr(dataset_train, 'exposures', None)
+    if exposures is None:
+        return split_metadata
+    from collections import Counter
+    per_crop = Counter()
+    for (sample_key, count) in exposures.items():
+        crop_type = sample_key.split(':', 2)[1] if sample_key.count(':') >= 2 else 'unknown'
+        per_crop[crop_type] += count
+    enriched = dict(split_metadata)
+    enriched['exposure_summary'] = {
+        'total_exposures': int(sum(exposures.values())),
+        'unique_records_exposed': int(len(exposures)),
+        'by_crop_type': {k: int(v) for k, v in per_crop.items()},
+    }
+    return enriched
 
 
 def str2bool(value):
@@ -48,11 +70,23 @@ def get_args_parser():
     parser.add_argument('--save_freq', default=400, type=int)
     parser.add_argument('--checkpoint_encoder', default='', type=str)
     parser.add_argument('--checkpoint_decoder', default='', type=str)
+    parser.add_argument('--resume', default='', type=str,
+                        help='full recovery checkpoint (model + optimizer + scaler + epoch); '
+                             'takes precedence over --checkpoint_encoder/--checkpoint_decoder')
     parser.add_argument('--data_path', default='.datasets/intraoral', type=str)  # fill in the dataset path here
     parser.add_argument('--val_data_path', default='', type=str,
                         help='optional validation dataset path; if empty, split data_path by val_ratio')
     parser.add_argument('--val_ratio', default=0.1, type=float,
                         help='validation ratio when val_data_path is empty')
+    parser.add_argument('--split_json', default=None, type=str,
+                        help='case-level train/test split JSON (datasets/split.py::create_or_load_split); '
+                             'when set, replaces the path-order val_ratio split')
+    parser.add_argument('--split', default='train', type=str, choices=('train', 'test'),
+                        help='partition of --split_json to use for this run')
+    parser.add_argument('--categories', default='full,tooth,sextant,group', type=str,
+                        help='comma-separated crop categories: full,tooth,sextant,group')
+    parser.add_argument('--category_sampling', default=None, type=str,
+                        help='per-category downsampling ratios, e.g. "full:1.0,tooth:0.5,sextant:0.5,group:0.5"')
     parser.add_argument('--mask_ratio', default=0.75, type=float,
                         help='Masking ratio (percentage of removed patches).')
 
@@ -194,7 +228,21 @@ def select_visualization_paths(image_paths, num_images, seed):
 
 
 def select_categorized_visualization_paths(dataset, num_images, seed):
-    if num_images <= 0 or not hasattr(dataset, 'image_paths'):
+    if num_images <= 0 or len(dataset) == 0:
+        return {}
+
+    # 记录式数据集按 crop_type 分组；旧式路径数据集按目录名分组
+    if hasattr(dataset, 'records') and dataset.records:
+        categories = {crop: [] for crop in ('full', 'tooth', 'sextant', 'group')}
+        for record in dataset.records:
+            categories[record['crop_type']].append(record['source_image_path'])
+        return {
+            category: select_visualization_paths(paths, num_images, seed + index)
+            for index, (category, paths) in enumerate(categories.items())
+            if paths
+        }
+
+    if not hasattr(dataset, 'image_paths'):
         return {}
 
     category_paths = {
@@ -351,16 +399,50 @@ def main(args):
     dataset_train = build_dataset(is_train=True, args=args)
     if len(dataset_train) == 0:
         raise ValueError(f"No training images found under data_path: {args.data_path}")
-    dataset_val = build_dataset(is_train=False, args=args)
+    if getattr(args, 'split_json', None):
+        # 病例级 split：验证集取互补划分（train 运行 → test，test 运行 → train）
+        from utils import dental_records
+        val_split = 'test' if args.split == 'train' else 'train'
+        val_categories = [c.strip() for c in args.categories.split(',') if c.strip()]
+        val_records = dental_records.build_records(
+            args.data_path, args.split_json, val_split, val_categories)
+        dataset_val = DentalRecordDataset(
+            val_records, transform=build_transform(is_train=False, args=args),
+            is_train=False, output_dir=args.output_dir, seed=args.seed)
+        print(f"val dataset built from split[{val_split}], records: {len(dataset_val)}")
+    else:
+        dataset_val = build_dataset(is_train=False, args=args)
     vis_paths_by_category = {}
     vis_transform = build_transform(is_train=False, args=args)
+
+    # 病例级 split：导出 manifest + 审计（主进程）
+    split_metadata = None
+    if getattr(args, 'split_json', None):
+        from utils import dental_records
+        split_metadata = {
+            'split_json': str(args.split_json),
+            'split': args.split,
+            'categories': args.categories,
+            'category_sampling': args.category_sampling,
+            'data_root': str(args.data_path),
+        }
+        if misc.is_main_process():
+            if isinstance(dataset_train, DentalRecordDataset):
+                dataset_train.write_manifest('train_manifest')
+                dental_records.print_audit(dataset_train.records, 'train')
+            if isinstance(dataset_val, DentalRecordDataset):
+                dataset_val.write_manifest('val_manifest')
+                dental_records.print_audit(dataset_val.records, val_split)
+                split_metadata['val_manifest'] = dataset_val.manifest_path
+            split_metadata['train_manifest'] = dataset_train.manifest_path
+
     if misc.is_main_process() and args.vis_num_images > 0:
         vis_paths_by_category = select_categorized_visualization_paths(
             dataset_train, args.vis_num_images, args.seed
         )
         print("Visualization samples:")
-        for category in ('process', 'sextant', 'single_tooth'):
-            print(f"  {category}: {len(vis_paths_by_category.get(category, []))} images")
+        for category, paths in vis_paths_by_category.items():
+            print(f"  {category}: {len(paths)} images")
 
     if args.distributed:
         sampler_train = torch.utils.data.DistributedSampler(
@@ -438,7 +520,11 @@ def main(args):
     loss_scaler = NativeScaler()
 
     # Create model
-    misc.load_model(args=args, model_without_ddp=model_without_ddp)
+    if args.resume:
+        misc.load_resume(args=args, model_without_ddp=model_without_ddp,
+                         optimizer=optimizer, loss_scaler=loss_scaler)
+    else:
+        misc.load_model(args=args, model_without_ddp=model_without_ddp)
 
     # Start the training process
     if args.output_dir and misc.is_main_process():
@@ -481,7 +567,8 @@ def main(args):
         if args.output_dir and misc.is_main_process() and ((epoch + 1) % args.save_freq == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                loss_scaler=loss_scaler, epoch=epoch + 1)
+                loss_scaler=loss_scaler, epoch=epoch + 1,
+                split_metadata=_with_exposures(split_metadata, dataset_train))
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch, }
