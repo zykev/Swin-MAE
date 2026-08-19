@@ -45,7 +45,7 @@ export CUDA_VISIBLE_DEVICES
 DATA_ROOT="${DATA_ROOT:-${WORKSPACE_ROOT}/.datasets/intraoral}"
 SPLIT_JSON="${SPLIT_JSON:-${WORKSPACE_ROOT}/.datasets/intraoral/train_test_seed0_test0p2.json}"
 # 448 分辨率用独立输出目录，避免覆盖已有 224 训练产物（compare manifest 引用旧路径）
-OUTPUT_DIR="${OUTPUT_DIR:-${SWINMAE_ROOT}/exp/swin_mae_dental_v1_448}"
+OUTPUT_DIR="${OUTPUT_DIR:-${SWINMAE_ROOT}/exp/swin_mae_dental_448}"
 INIT_CKPT="${INIT_CKPT:-${WORKSPACE_ROOT}/.checkpoints/intraoral/swin_tiny_patch4_window7_224.pth}"
 
 # 额外透传参数（如 --resume ...、--category_sampling ...、--split test）
