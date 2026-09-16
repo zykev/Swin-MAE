@@ -114,10 +114,46 @@ def four_tooth_group_candidates(view, available_fdis):
     return [group for group in candidates if all(fdi in available for fdi in group)]
 
 
+# --- data root compatibility (intraoral / intraoral1) ---------------------
+#
+# 不同服务器上数据根目录可能叫 ``.datasets/intraoral``，也可能叫
+# ``.datasets/intraoral1``（挂载点不同、符号链接失效等）。规则是【优先用调用方
+# 给的路径，只有它不存在时才切换到另一个名字】，因此同一份命令/配置在两种机器
+# 上都能跑。两个候选都不存在时返回原路径，由调用方抛出原有的上下文报错。
+
+_COMPATIBLE_DIRECTORY_NAMES = {
+    "intraoral": "intraoral1",
+    "intraoral1": "intraoral",
+}
+
+
+def compatible_path_candidate(path):
+    """Return the counterpart path obtained by swapping one supported directory name."""
+    path = Path(path).expanduser()
+    parts = list(path.parts)
+    for index, part in enumerate(parts):
+        replacement = _COMPATIBLE_DIRECTORY_NAMES.get(part)
+        if replacement is not None:
+            parts[index] = replacement
+            return Path(*parts)
+    return None
+
+
+def resolve_compatible_path(path):
+    """Use *path* when it exists, otherwise try its ``intraoral``/``intraoral1`` counterpart."""
+    path = Path(path).expanduser()
+    if path.exists():
+        return path
+    candidate = compatible_path_candidate(path)
+    if candidate is not None and candidate.exists():
+        return candidate
+    return path
+
+
 # --- split / annotation loading -------------------------------------------
 
 def load_split(split_json):
-    split_path = Path(split_json)
+    split_path = resolve_compatible_path(split_json)
     if not split_path.exists():
         raise FileNotFoundError(f"split_json does not exist: {split_path}")
     with split_path.open("r", encoding="utf-8") as f:
@@ -236,7 +272,8 @@ def build_records(data_root, split_json, split, categories):
         categories: iterable of crop types, subset of ("full","tooth","sextant","group").
     """
     split_data = load_split(split_json)
-    data_root = str(Path(data_root).resolve())
+    # data_root 优先用调用方给的路径，失效时回退到 intraoral/intraoral1 的另一个
+    data_root = str(resolve_compatible_path(data_root).resolve())
     split_data = dict(split_data)
     if not split_data.get("data_root"):
         split_data["data_root"] = data_root
@@ -251,6 +288,8 @@ def build_records(data_root, split_json, split, categories):
         json_path = Path(json_path)
         if not json_path.is_absolute():
             json_path = Path(data_root) / json_path
+        # split JSON 里的 data_root 也可能是已失效的 intraoral，逐条记录再回退一次
+        json_path = resolve_compatible_path(json_path)
         ann = load_annotation(json_path)
         case_id = str(ann.get("case_id") or json_path.parent.name)
         view = str(ann.get("view") or json_path.stem)
