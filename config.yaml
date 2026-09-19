@@ -24,10 +24,20 @@ DATA:
 MODEL:
   # Choose one of: swin_mae_t, swin_mae_s, swin_mae_b.
   # Use swin_mae if you want to override encoder details in the SWIN section below.
-  MODEL: swin_mae_t
+  #
+  # 2026-09-20: tiny -> small，与自有方法的 swin small 预设（models/swin_backbone.py
+  # SWIN_PRESETS['swins']）对齐。swin_mae_s 走 swin_mae.py::SWIN_MAE_VARIANTS['small']
+  #   = embed_dim 96 / depths (2,2,18,2) / num_heads (3,6,12,24) / window 7 / drop_path 0.3
+  #   （tiny 是 (2,2,6,2) / drop_path 0.2，drop_path 只在用变体入口时生效）。
+  # ⚠️ 必须与 CHECKPOINT_ENCODER 成对切换：tiny 与 small 的 embed_dim / num_heads 完全相同
+  #   -> 错配不会报 shape 错，utils/misc.py::load_model 只按 key 名剔除 + strict=False，
+  #   tiny ckpt 喂 swin_mae_s 时 stage2 只会填入前 6/18 个 block，其余静默保持随机。
+  MODEL: swin_mae_s
   MASK_RATIO: 0.75
   NORM_PIX_LOSS: true
-  CHECKPOINT_ENCODER: ".checkpoints/intraoral/swin_tiny_patch4_window7_224.pth"
+  # 只有 22k 版的 swin_small（官方仓没有 in1k 版）；tiny 用的则是 1k 版，
+  # 因此这次切换同时把预训练配方从 ImageNet-1k 换成 ImageNet-22k。
+  CHECKPOINT_ENCODER: ".checkpoints/intraoral/swin_small_patch4_window7_224_22k.pth"
   CHECKPOINT_DECODER: ""
 
 OPTIM:
@@ -65,7 +75,9 @@ SWIN:
   # Leave null to match the decoder input to the selected encoder automatically.
   DECODER_EMBED_DIM:
   EMBED_DIM: 96
-  DEPTHS: [2, 2, 6, 2]
+  # 镜像 SWIN_MAE_VARIANTS['small']；这些字段只在 MODEL.MODEL == swin_mae 时才被
+  # train.py::get_model_kwargs 转发，用 swin_mae_s 时以变体预设为准。
+  DEPTHS: [2, 2, 18, 2]
   NUM_HEADS: [3, 6, 12, 24]
   WINDOW_SIZE: 7
   QKV_BIAS: true

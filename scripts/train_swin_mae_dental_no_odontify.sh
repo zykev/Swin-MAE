@@ -5,21 +5,23 @@ set -e
 #
 # 本脚本是 scripts/train_swin_mae_dental.sh 的「预设包装」：只预设下面 4 个环境变量，
 # 训练超参（200 epoch / lr 1e-4 / batch 16 / INPUT_SIZE=448 /
-# categories full,tooth,sextant,group / 官方 Swin-T 权重初始化 …）全部沿用原脚本，
-# 不在两处重复声明，避免以后改超参时两边漂移。
+# categories full,tooth,sextant,group / --model swin_mae_s + 官方 Swin-Small(22k) 权重初始化 …）
+# 全部沿用原脚本，不在两处重复声明，避免以后改超参时两边漂移。
+# （原脚本已于 2026-09-20 由 Swin-T 切换为 Swin-Small，本包装自动跟随。）
 #
 #   1) SPLIT_JSON  -> <root>/.datasets/intraoral/train_test_seed0_test0p2_no_odontify.json
 #                     新的病例级 split（把 AIDC 纳入训练、排除 odontify 外部集）
 #   2) DATA_ROOT   -> <root>/.datasets/intraoral（intraoral -> intraoral1 回退不变）
-#   3) OUTPUT_DIR  -> exp/swin_mae_dental_448_no_odontify
-#                     与旧的 exp/swin_mae_dental_448 完全隔离：旧产物是 compare/ 各 run
-#                     的 manifest 引用对象，绝不能覆盖
+#   3) OUTPUT_DIR  -> exp/swin_mae_dental_small_448_no_odontify
+#                     与旧的 exp/swin_mae_dental_448 完全隔离：旧产物是 Swin-T 结果、
+#                     被 9 个 compare/outputs/*/manifest.json 引用，绝不能覆盖；
+#                     目录名带 small 以标示这次是 Swin-Small 架构。
 #   4) MASTER_PORT -> 29532（与原脚本默认 29501 错开，便于 4 个 baseline 并行起）
 #
 # 用法（从任意目录；参数原样透传给原脚本）:
 #   bash baselines/Swin-MAE/scripts/train_swin_mae_dental_no_odontify.sh
 #   bash baselines/Swin-MAE/scripts/train_swin_mae_dental_no_odontify.sh \
-#       --resume exp/swin_mae_dental_448_no_odontify/checkpoint-050.pth
+#       --resume exp/swin_mae_dental_small_448_no_odontify/checkpoint-050.pth
 #
 # 环境变量优先级仍然是「显式传入 > 本脚本预设」，例如:
 #   GPUS="0 1" OUTPUT_DIR=/tmp/swinmae_try \
@@ -56,7 +58,7 @@ resolve_dental_path() {
 export DATA_ROOT="${DATA_ROOT:-$(resolve_dental_path "")}"
 export SPLIT_JSON="${SPLIT_JSON:-$(resolve_dental_path "${NEW_SPLIT_SUFFIX}")}"
 # 新 split 用独立输出目录，避免覆盖 compare/ manifest 还在引用的旧产物
-export OUTPUT_DIR="${OUTPUT_DIR:-${SWINMAE_ROOT}/exp/swin_mae_dental_448_no_odontify}"
+export OUTPUT_DIR="${OUTPUT_DIR:-${SWINMAE_ROOT}/exp/swin_mae_dental_small_448_no_odontify}"
 export MASTER_PORT="${MASTER_PORT:-29532}"
 
 if [ ! -e "${SPLIT_JSON}" ]; then

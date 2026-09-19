@@ -3,12 +3,22 @@ set -e
 
 # Swin-MAE 牙科 SSL 预训练（病例级 split，§9.5.4）
 # 用法（在 baselines/Swin-MAE 下执行；从任意目录运行也可，路径自动解析）:
-#   ./scripts/train_swin_mae_dental.sh                                        # 官方 Swin-T 权重初始化
-#   ./scripts/train_swin_mae_dental.sh --resume exp/swin_mae_dental_v1_448/checkpoint-050.pth   # 中断恢复
+#   ./scripts/train_swin_mae_dental.sh                                        # 官方 Swin-Small(22k) 权重初始化
+#   ./scripts/train_swin_mae_dental.sh --resume exp/swin_mae_dental_small_448/checkpoint-050.pth   # 中断恢复
 #   ./scripts/train_swin_mae_dental.sh --checkpoint_encoder <adapted-ckpt>   #  自定义编码器初始化
 #
+# 编码器变体（2026-09-20 由 Swin-T 改为 Swin-Small，与 ours 的 swins 预设对齐）：
+#   本脚本显式传 --model swin_mae_s，与 INIT_CKPT 的官方
+#   swin_small_patch4_window7_224_22k.pth 成对使用；config.yaml 的 MODEL.MODEL 也已是
+#   swin_mae_s（这里显式传参是为了即使 config.yaml 因 cwd 找不到而回落到 argparse 默认值
+#   —— --model swin_mae + depths (2,2,2,2) —— 也仍然是正确架构）。
+#   ⚠️ Swin-T 与 Swin-Small 的 embed_dim(96) / num_heads 完全相同，错配不会报 shape 错，
+#   load_model 会静默丢 block（tiny ckpt 喂 swin_mae_s = stage2 只填 6/18 个 block）。
+#   要换回 tiny：追加 --model swin_mae_t --checkpoint_encoder .../swin_tiny_patch4_window7_224.pth
+#   （命令行参数在最后，会覆盖脚本里的值）。
+#
 # 分辨率说明：默认 INPUT_SIZE=448，与 ours（full_canvas 448）统一，dense 特征网格
-#   14x14（stride 32）。官方 swin_tiny_patch4_window7_224.pth 可直接初始化：
+#   14x14（stride 32）。官方 swin_small_patch4_window7_224_22k.pth 可直接初始化：
 #   - Swin 编码器用相对位置编码（window 7，bias 表 13x13）与 patch_embed（4x4），
 #     均与输入分辨率无关；
 #   - MAE 的 pos_embed 是固定正弦编码（requires_grad=False），initialize_weights 会
@@ -57,9 +67,12 @@ resolve_dental_path() {
 
 DATA_ROOT="${DATA_ROOT:-$(resolve_dental_path "")}"
 SPLIT_JSON="${SPLIT_JSON:-$(resolve_dental_path "/train_test_seed0_test0p2.json")}"
-# 448 分辨率用独立输出目录，避免覆盖已有 224 训练产物（compare manifest 引用旧路径）
-OUTPUT_DIR="${OUTPUT_DIR:-${SWINMAE_ROOT}/exp/swin_mae_dental_448}"
-INIT_CKPT="${INIT_CKPT:-${WORKSPACE_ROOT}/.checkpoints/intraoral/swin_tiny_patch4_window7_224.pth}"
+# Swin-Small + 448 用独立输出目录：目录名带 small，与旧的 exp/swin_mae_dental_448
+# （Swin-T 产物，被 9 个 compare/outputs/*/manifest.json 引用）彻底隔离，避免新架构
+# 覆盖历史 checkpoint。
+OUTPUT_DIR="${OUTPUT_DIR:-${SWINMAE_ROOT}/exp/swin_mae_dental_small_448}"
+# 必须与下面的 --model swin_mae_s 成对：tiny/small 的 embed_dim 相同，错配会静默丢 block
+INIT_CKPT="${INIT_CKPT:-${WORKSPACE_ROOT}/.checkpoints/intraoral/swin_small_patch4_window7_224_22k.pth}"
 
 # 额外透传参数（如 --resume ...、--category_sampling ...、--split test）
 EXTRA_ARGS="$@"
@@ -69,6 +82,7 @@ echo "[train_swin_mae_dental] GPUS=${CUDA_VISIBLE_DEVICES} NUM_GPUS=${NUM_GPUS}"
 echo "[train_swin_mae_dental] DATA_ROOT=${DATA_ROOT}"
 echo "[train_swin_mae_dental] SPLIT_JSON=${SPLIT_JSON}"
 echo "[train_swin_mae_dental] OUTPUT_DIR=${OUTPUT_DIR}"
+echo "[train_swin_mae_dental] MODEL=swin_mae_s (Swin-Small) INIT_CKPT=${INIT_CKPT}"
 
 torchrun --nproc_per_node="${NUM_GPUS}" train.py \
     --input_size "${INPUT_SIZE}" \
@@ -87,6 +101,7 @@ torchrun --nproc_per_node="${NUM_GPUS}" train.py \
     --split_json "${SPLIT_JSON}" \
     --split train \
     --categories "full,tooth,sextant,group" \
+    --model swin_mae_s \
     --checkpoint_encoder "${INIT_CKPT}" \
     --output_dir "${OUTPUT_DIR}" \
     --log_dir "${OUTPUT_DIR}" \
