@@ -31,26 +31,48 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SWINMAE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${SWINMAE_ROOT}/../.." && pwd)"
 
-# 指定用于训练的 GPU，可以写成 "cuda:0 cuda:1 cuda:2" 或 "0 1 2"
+# 指定用于训练的 GPU：分隔符空格 / 逗号 / 分号都接受，元素可带 cuda: 前缀
+#   GPUS="2 3"   GPUS="2,3"   GPUS="cuda:2 cuda:3"   GPUS="2, 3"
+# 默认 6 卡；MASTER_PORT 默认 29501（torchrun 默认 29500 常被其它任务占用，可覆盖）。
 GPUS="${GPUS:-2 3 4 5 6 7}"
 
 # 训练输入分辨率（与 ours full_canvas=448 统一）；patch token 数随分辨率平方增长，
 # 448 下 batch_size 已相应调小（224 时为 64）
 INPUT_SIZE="${INPUT_SIZE:-448}"
 
+# 解析 GPUS -> torchrun 用的 CUDA_VISIBLE_DEVICES 列表与卡数 NUM_GPUS：
+# 分隔符空格 / 逗号 / 分号都接受，元素可带 cuda: 前缀，以下四种等价：
+#   GPUS="2 3"   GPUS="2,3"   GPUS="cuda:2 cuda:3"   GPUS="2, 3"
+# set -f：解析期间关闭通配符展开（GPUS 里误写 * ? [ 时不会被 glob 成文件名）。
 CUDA_VISIBLE_DEVICES=""
 NUM_GPUS=0
-for GPU in $GPUS; do
+set -f
+for GPU in $(printf '%s\n' "${GPUS}" | tr ',;' '  '); do
     GPU_ID=${GPU#cuda:}
-    if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
-        CUDA_VISIBLE_DEVICES=$GPU_ID
+    case "${GPU_ID}" in
+        ''|*[!0-9]*)
+            echo "[train_swin_mae_dental] ERROR: GPUS 中的 '${GPU}' 不是合法 GPU 序号" >&2
+            echo "  合法写法: GPUS=\"2 3\" / GPUS=\"2,3\" / GPUS=\"cuda:2 cuda:3\"" >&2
+            exit 1
+            ;;
+    esac
+    if [ -z "${CUDA_VISIBLE_DEVICES}" ]; then
+        CUDA_VISIBLE_DEVICES=${GPU_ID}
     else
-        CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES,$GPU_ID
+        CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES},${GPU_ID}
     fi
     NUM_GPUS=$((NUM_GPUS + 1))
 done
+set +f
+if [ "${NUM_GPUS}" -eq 0 ]; then
+    echo "[train_swin_mae_dental] ERROR: GPUS 为空，应形如 GPUS=\"2 3\" 或 GPUS=\"2,3\"" >&2
+    exit 1
+fi
 
 export CUDA_VISIBLE_DEVICES
+
+# 分布式 rendezvous 端口：torchrun 默认 29500，本机常被其它任务占用
+MASTER_PORT="${MASTER_PORT:-29501}"
 
 # 数据根目录兼容：优先 .datasets/intraoral，找不到（挂载点缺失 / 符号链接失效）时
 # 回退到 .datasets/intraoral1。显式设置 DATA_ROOT / SPLIT_JSON 时以环境变量为准，不回退。
@@ -78,13 +100,13 @@ INIT_CKPT="${INIT_CKPT:-${WORKSPACE_ROOT}/.checkpoints/intraoral/swin_small_patc
 EXTRA_ARGS="$@"
 
 cd "${SWINMAE_ROOT}"
-echo "[train_swin_mae_dental] GPUS=${CUDA_VISIBLE_DEVICES} NUM_GPUS=${NUM_GPUS}"
+echo "[train_swin_mae_dental] GPUS=${CUDA_VISIBLE_DEVICES} NUM_GPUS=${NUM_GPUS} MASTER_PORT=${MASTER_PORT}"
 echo "[train_swin_mae_dental] DATA_ROOT=${DATA_ROOT}"
 echo "[train_swin_mae_dental] SPLIT_JSON=${SPLIT_JSON}"
 echo "[train_swin_mae_dental] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[train_swin_mae_dental] MODEL=swin_mae_s (Swin-Small) INIT_CKPT=${INIT_CKPT}"
 
-torchrun --nproc_per_node="${NUM_GPUS}" train.py \
+torchrun --nproc_per_node="${NUM_GPUS}" --master_port="${MASTER_PORT}" train.py \
     --input_size "${INPUT_SIZE}" \
     --batch_size 16 \
     --epochs 200 \
