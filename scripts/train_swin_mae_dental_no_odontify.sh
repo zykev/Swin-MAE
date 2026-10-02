@@ -8,7 +8,7 @@ set -e
 #
 # 用法（在 baselines/Swin-MAE 下执行；从任意目录运行也可，路径自动解析）:
 #   ./scripts/train_swin_mae_dental_no_odontify.sh
-#   ./scripts/train_swin_mae_dental_no_odontify.sh --resume exp/swin_mae_dental_small_448_no_odontify/checkpoint-050.pth
+#   ./scripts/train_swin_mae_dental_no_odontify.sh --resume exp/swin_mae_dental_small_448_no_odontify/checkpoint-50.pth
 #   ./scripts/train_swin_mae_dental_no_odontify.sh --checkpoint_encoder <adapted-ckpt>
 #
 # 可覆盖环境变量:
@@ -131,16 +131,20 @@ echo "[train_swin_mae_dental_no_odontify] SPLIT_JSON=${SPLIT_JSON}"
 echo "[train_swin_mae_dental_no_odontify] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[train_swin_mae_dental_no_odontify] MODEL=swin_mae_s (Swin-Small) INIT_CKPT=${INIT_CKPT}"
 
+# ckpt 保存频率：--save_freq 10 → 每 10 个 epoch 存一次（train.py:
+# (epoch + 1) % save_freq == 0 or epoch + 1 == epochs）→ 50 epoch 下产出
+# checkpoint-10/20/30/40/50.pth（文件名不补零，数字是 epoch+1）。
+# --vis_freq 保持 50：只影响重建可视化频率，与 ckpt 无关。
 torchrun --nproc_per_node="${NUM_GPUS}" --master_port="${MASTER_PORT}" train.py \
     --input_size "${INPUT_SIZE}" \
     --batch_size 16 \
-    --epochs 100 \
+    --epochs 50 \
     --warmup_epochs 5 \
     --mask_ratio 0.75 \
     --lr 1e-4 \
     --min_lr 1e-6 \
     --weight_decay 0.05 \
-    --save_freq 50 \
+    --save_freq 10 \
     --vis_freq 50 \
     --vis_num_images 8 \
     --norm_pix_loss \
