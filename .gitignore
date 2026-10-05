@@ -1,6 +1,7 @@
 .vscode
 tmp
-wandb
+swanlab
+swanlog
 .datasets
 .checkpoints
 

@@ -220,6 +220,8 @@ def build_dataset(is_train, args):
 
     # 旧逻辑兜底：按 --val_data_path / --val_ratio 做路径序划分（无 case 级 split 时使用）
     data_path = args.data_path if is_train or not getattr(args, 'val_data_path', '') else args.val_data_path
+    # 优先 .datasets/intraoral，挂载点缺失/符号链接失效时回退 .datasets/intraoral1。
+    data_path = str(dental_records.resolve_compatible_path(data_path))
     print(f"Scanning intraoral images from {data_path}...")
     all_imgs = get_intraoral_images(data_path)
 

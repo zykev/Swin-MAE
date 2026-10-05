@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from tooth_dataset import build_transform
 from visualize import load_model, load_training_args
+from utils.dental_records import resolve_compatible_path
 
 
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.bmp'}
@@ -526,7 +527,8 @@ def main(args):
         raise FileNotFoundError(f'Checkpoint not found: {args.checkpoint}')
 
     train_args = load_training_args(args.config)
-    data_root = Path(args.data_path or train_args.data_path)
+    # 优先 .datasets/intraoral，挂载点缺失/符号链接失效时回退 .datasets/intraoral1。
+    data_root = Path(resolve_compatible_path(args.data_path or train_args.data_path))
     data_path = data_root / args.collector if args.collector else data_root
     if not data_path.is_dir():
         raise FileNotFoundError(f'Evaluation data directory not found: {data_path}')

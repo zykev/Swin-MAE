@@ -87,14 +87,14 @@ def get_args_parser():
                         help='log reconstruction visualizations every N epochs, 0 for final epoch only')
     parser.add_argument('--vis_num_images', default=8, type=int,
                         help='number of fixed images used for reconstruction visualization')
-    parser.add_argument('--wandb', action='store_true',
-                        help='enable Weights & Biases logging')
-    parser.add_argument('--wandb_project', default='mae-pretrain', type=str,
-                        help='Weights & Biases project name')
-    parser.add_argument('--wandb_entity', default='intraoral', type=str,
-                        help='Weights & Biases entity name')
-    parser.add_argument('--wandb_run_name', default=None, type=str,
-                        help='Weights & Biases run name')
+    parser.add_argument('--swanlab', action='store_true',
+                        help='enable SwanLab logging')
+    parser.add_argument('--swanlab_project', default='dentmap', type=str,
+                        help='SwanLab project name')
+    parser.add_argument('--swanlab_workspace', default='zykev', type=str,
+                        help='SwanLab workspace (team/organization)')
+    parser.add_argument('--swanlab_run_name', default=None, type=str,
+                        help='SwanLab run name')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
@@ -180,8 +180,8 @@ def select_categorized_visualization_paths(dataset, num_images, seed):
 @torch.no_grad()
 def log_reconstruction_visualizations(
         model, image_paths, transform, device, epoch, args, log_writer, tag,
-        save_path=None, wandb_run=None):
-    if log_writer is None and wandb_run is None:
+        save_path=None, swanlab_run=None):
+    if log_writer is None and swanlab_run is None:
         return
     if len(image_paths) == 0:
         return
@@ -225,13 +225,13 @@ def log_reconstruction_visualizations(
     if save_path is not None:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         vutils.save_image(grid, save_path)
-    if wandb_run is not None:
-        import wandb
+    if swanlab_run is not None:
+        import swanlab
         if save_path is not None:
-            wandb_image = wandb.Image(save_path)
+            swanlab_image = swanlab.Image(save_path)
         else:
-            wandb_image = wandb.Image(grid.detach().cpu().permute(1, 2, 0).numpy())
-        wandb_run.log({tag: wandb_image}, step=(epoch + 1) * 1000)
+            swanlab_image = swanlab.Image(grid.detach().cpu().permute(1, 2, 0).numpy())
+        swanlab_run.log({tag: swanlab_image}, step=(epoch + 1) * 1000)
 
     if was_training:
         model.train()
@@ -290,18 +290,18 @@ def main(args):
     else:
         log_writer = None
 
-    wandb_run = None
-    if misc.is_main_process() and args.wandb:
+    swanlab_run = None
+    if misc.is_main_process() and args.swanlab:
         try:
-            import wandb
+            import swanlab
         except ImportError as exc:
-            raise ImportError("wandb logging requested, but wandb is not installed.") from exc
-        wandb_run = wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=args.wandb_run_name,
+            raise ImportError("swanlab logging requested, but swanlab is not installed.") from exc
+        swanlab_run = swanlab.init(
+            project=args.swanlab_project,
+            workspace=args.swanlab_workspace,
+            name=args.swanlab_run_name,
             config=vars(args),
-            dir=args.output_dir if args.output_dir else None,
+            log_dir=args.output_dir if args.output_dir else None,
         )
 
     data_loader_train = torch.utils.data.DataLoader(
@@ -363,11 +363,11 @@ def main(args):
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             log_writer=log_writer,
-            wandb_run=wandb_run,
+            swanlab_run=swanlab_run,
             args=args
         )
         visualize_this_epoch = (
-            (log_writer is not None or wandb_run is not None) and
+            (log_writer is not None or swanlab_run is not None) and
             args.vis_num_images > 0 and
             ((args.vis_freq > 0 and epoch % args.vis_freq == 0) or epoch + 1 == args.epochs)
         )
@@ -383,7 +383,7 @@ def main(args):
                         category,
                         f'epoch_{epoch:04d}.jpg',
                     ) if args.output_dir else None,
-                    wandb_run=wandb_run,
+                    swanlab_run=swanlab_run,
                 )
         save_this_epoch = (
             args.output_dir and
@@ -398,8 +398,8 @@ def main(args):
                         'epoch': epoch,}
 
         if misc.is_main_process():
-            if wandb_run is not None:
-                wandb_run.log(log_stats, step=(epoch + 1) * 1000)
+            if swanlab_run is not None:
+                swanlab_run.log(log_stats, step=(epoch + 1) * 1000)
             if args.output_dir:
                 if log_writer is not None:
                     log_writer.flush()
@@ -409,8 +409,8 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
-    if wandb_run is not None:
-        wandb_run.finish()
+    if swanlab_run is not None:
+        swanlab_run.finish()
 
 
 if __name__ == '__main__':

@@ -14,6 +14,7 @@ from train import (
     save_visualization,
     select_categorized_visualization_paths,
 )
+from utils.dental_records import resolve_compatible_path
 
 
 def get_args_parser():
@@ -84,7 +85,9 @@ def main(args):
         raise RuntimeError('CUDA was requested but is not available. Use --device cpu if needed.')
     device = torch.device(args.device)
 
-    image_paths = get_intraoral_images(train_args.data_path)
+    # 优先 .datasets/intraoral，挂载点缺失/符号链接失效时回退 .datasets/intraoral1。
+    data_path = str(resolve_compatible_path(train_args.data_path))
+    image_paths = get_intraoral_images(data_path)
     dataset = DentalDataset(image_paths)
     paths_by_category = select_categorized_visualization_paths(
         dataset,
@@ -92,7 +95,7 @@ def main(args):
         train_args.seed,
     )
     if not paths_by_category:
-        raise ValueError(f'No visualization images found under {train_args.data_path}')
+        raise ValueError(f'No visualization images found under {data_path}')
 
     print('Visualization samples:')
     for category in ('process', 'sextant', 'single_tooth'):

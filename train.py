@@ -25,6 +25,7 @@ from utils.misc import NativeScalerWithGradNormCount as NativeScaler
 import swin_mae
 from tooth_dataset import build_dataset, build_transform, DentalRecordDataset
 from utils.engine_pretrain import train_one_epoch
+from utils.dental_records import resolve_compatible_path
 
 
 def _with_exposures(split_metadata, dataset_train):
@@ -73,7 +74,8 @@ def get_args_parser():
     parser.add_argument('--resume', default='', type=str,
                         help='full recovery checkpoint (model + optimizer + scaler + epoch); '
                              'takes precedence over --checkpoint_encoder/--checkpoint_decoder')
-    parser.add_argument('--data_path', default='.datasets/intraoral', type=str)  # fill in the dataset path here
+    parser.add_argument('--data_path',
+                        default=str(resolve_compatible_path('.datasets/intraoral')), type=str)  # fill in the dataset path here
     parser.add_argument('--val_data_path', default='', type=str,
                         help='optional validation dataset path; if empty, split data_path by val_ratio')
     parser.add_argument('--val_ratio', default=0.1, type=float,
@@ -134,11 +136,11 @@ def get_args_parser():
                         help='save reconstruction visualizations every N epochs, 0 for final epoch only')
     parser.add_argument('--vis_num_images', default=8, type=int,
                         help='number of fixed images used for reconstruction visualization')
-    parser.add_argument('--wandb', action='store_true',
-                        help='enable Weights & Biases logging')
-    parser.add_argument('--wandb_project', default='swin-mae-pretrain', type=str)
-    parser.add_argument('--wandb_entity', default=None, type=str)
-    parser.add_argument('--wandb_run_name', default=None, type=str)
+    parser.add_argument('--swanlab', action='store_true',
+                        help='enable SwanLab logging')
+    parser.add_argument('--swanlab_project', default='dentmap', type=str)
+    parser.add_argument('--swanlab_workspace', default='zykev', type=str)
+    parser.add_argument('--swanlab_run_name', default=None, type=str)
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
@@ -292,7 +294,7 @@ def get_model_kwargs(args):
 @torch.no_grad()
 def save_visualization(
         model, image_paths, transform, device, epoch, args, category,
-        log_writer=None, wandb_run=None):
+        log_writer=None, swanlab_run=None):
     if len(image_paths) == 0:
         return
 
@@ -340,13 +342,13 @@ def save_visualization(
 
     if log_writer is not None:
         log_writer.add_image(tag, grid, epoch + 1)
-    if wandb_run is not None:
-        import wandb
+    if swanlab_run is not None:
+        import swanlab
         if save_path is not None:
-            image = wandb.Image(save_path)
+            image = swanlab.Image(save_path)
         else:
-            image = wandb.Image(grid.detach().cpu().permute(1, 2, 0).numpy())
-        wandb_run.log({tag: image}, step=epoch + 1, commit=False)
+            image = swanlab.Image(grid.detach().cpu().permute(1, 2, 0).numpy())
+        swanlab_run.log({tag: image}, step=epoch + 1)
 
     if was_training:
         model.train()
@@ -489,18 +491,18 @@ def main(args):
     else:
         log_writer = None
 
-    wandb_run = None
-    if args.wandb and misc.is_main_process():
+    swanlab_run = None
+    if args.swanlab and misc.is_main_process():
         try:
-            import wandb
+            import swanlab
         except ImportError as exc:
-            raise ImportError("wandb logging requested, but wandb is not installed.") from exc
-        wandb_run = wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=args.wandb_run_name,
+            raise ImportError("swanlab logging requested, but swanlab is not installed.") from exc
+        swanlab_run = swanlab.init(
+            project=args.swanlab_project,
+            workspace=args.swanlab_workspace,
+            name=args.swanlab_run_name,
             config=vars(args),
-            dir=args.output_dir if args.output_dir else None,
+            log_dir=args.output_dir if args.output_dir else None,
         )
 
     # Set model
@@ -562,7 +564,7 @@ def main(args):
                 save_visualization(
                     model_without_ddp, vis_paths, vis_transform,
                     device, epoch, args, category,
-                    log_writer=log_writer, wandb_run=wandb_run,
+                    log_writer=log_writer, swanlab_run=swanlab_run,
                 )
         if args.output_dir and misc.is_main_process() and ((epoch + 1) % args.save_freq == 0 or epoch + 1 == args.epochs):
             misc.save_model(
@@ -576,8 +578,8 @@ def main(args):
             log_stats['val_loss'] = val_loss
 
         if args.output_dir and misc.is_main_process():
-            if wandb_run is not None:
-                wandb_run.log(log_stats, step=epoch + 1)
+            if swanlab_run is not None:
+                swanlab_run.log(log_stats, step=epoch + 1)
             if log_writer is not None:
                 log_writer.flush()
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
@@ -585,8 +587,8 @@ def main(args):
 
     total_time = time.time() - start_time
     print('Training time {}'.format(str(datetime.timedelta(seconds=int(total_time)))))
-    if wandb_run is not None:
-        wandb_run.finish()
+    if swanlab_run is not None:
+        swanlab_run.finish()
 
 
 if __name__ == '__main__':
