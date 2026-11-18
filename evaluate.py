@@ -53,8 +53,10 @@ def get_args_parser():
                         help='training YAML used to construct the model')
     parser.add_argument('--data_path', default=None,
                         help='intraoral dataset root; defaults to DATA.DATA_PATH in the YAML')
-    parser.add_argument('--collector', default='zeyu', type=str,
+    parser.add_argument('--collector', default='', type=str,
                         help='collector subdirectory to evaluate; set to an empty string to use all collectors')
+    parser.add_argument('--split_json', default=None,
+                        help='case-level split JSON; defaults to the shared no-odontify split')
     parser.add_argument('--output_dir', default=None,
                         help='result directory; defaults to <checkpoint parent>/eval')
     parser.add_argument('--categories', nargs='+', default=['single_tooth', 'sextant'],
@@ -90,7 +92,7 @@ def normalize_fdi(value):
     return str(int(numeric_value)) if numeric_value.is_integer() else text
 
 
-def load_crop_annotations(processed_root):
+def load_crop_annotations(processed_root, allowed_annotations=None):
     """Index zeyu tooth and sextant annotations by (case_id, view, crop label)."""
     tooth_bbox_root = processed_root / 'tooth_bbox'
     if not tooth_bbox_root.is_dir():
@@ -98,6 +100,8 @@ def load_crop_annotations(processed_root):
 
     annotations = {'single_tooth': {}, 'sextant': {}}
     for annotation_path in sorted(tooth_bbox_root.rglob('*.json')):
+        if allowed_annotations is not None and annotation_path.resolve() not in allowed_annotations:
+            continue
         with annotation_path.open('r', encoding='utf-8') as handle:
             annotation = json.load(handle)
         sample_id = annotation_path.parent.name
@@ -128,7 +132,7 @@ def load_crop_annotations(processed_root):
     return annotations
 
 
-def build_pairs(data_path, categories):
+def build_pairs(data_path, categories, allowed_annotations=None):
     crop_records = []
     skipped_records = []
 
@@ -147,7 +151,7 @@ def build_pairs(data_path, categories):
                     for full_path in image_files(sample_dir):
                         full_images[relative_posix_path(full_path.relative_to(processed_root))] = full_path
 
-            crop_annotations = load_crop_annotations(processed_root) if categories else {}
+            crop_annotations = load_crop_annotations(processed_root, allowed_annotations) if categories else {}
 
             for category in categories:
                 crop_root = processed_root / category
@@ -158,6 +162,9 @@ def build_pairs(data_path, categories):
                         continue
                     for view_dir in sample_dir.iterdir():
                         if not view_dir.is_dir():
+                            continue
+                        annotation_path = processed_root / 'tooth_bbox' / sample_dir.name / f'{view_dir.name}.json'
+                        if allowed_annotations is not None and annotation_path.resolve() not in allowed_annotations:
                             continue
                         for crop_path in image_files(view_dir):
                             crop_relative_path = relative_posix_path(crop_path.relative_to(processed_root))
@@ -534,7 +541,12 @@ def main(args):
         raise FileNotFoundError(f'Evaluation data directory not found: {data_path}')
     output_dir = Path(args.output_dir or Path(args.checkpoint).parent / 'eval')
     device = torch.device(args.device)
-    pairs, skipped_records = build_pairs(data_path, args.categories)
+    split_path = Path(resolve_compatible_path(
+        args.split_json or data_root / 'train_test_seed0_test0p2_no_odontify.json'))
+    with split_path.open('r', encoding='utf-8') as handle:
+        split = json.load(handle)
+    allowed = {(data_root / p).resolve() for p in split['annotations']['test']}
+    pairs, skipped_records = build_pairs(data_path, args.categories, allowed)
     if not pairs:
         raise ValueError(f'No crop/full-mouth pairs found under {data_path}')
 
